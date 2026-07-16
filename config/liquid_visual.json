@@ -1,0 +1,9 @@
+{
+  "motion_intensity": 1.0,
+  "microphone_sensitivity": 1.0,
+  "visibility": 2.0,
+  "assistant_size": 109,
+  "quality": "balanced",
+  "droplets": true,
+  "reduced_motion": false
+}

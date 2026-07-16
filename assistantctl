@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import argparse
+
+from omar_ai_core.state import get_listening_muted, set_listening_muted
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Control Omar AI Core listening state.")
+    parser.add_argument("command", choices=["mute", "unmute", "status"])
+    args = parser.parse_args()
+
+    if args.command == "mute":
+        set_listening_muted(True)
+        print("assistant listening: muted")
+    elif args.command == "unmute":
+        set_listening_muted(False)
+        print("assistant listening: active")
+    else:
+        print("assistant listening:", "muted" if get_listening_muted(False) else "active")
+
+
+if __name__ == "__main__":
+    main()

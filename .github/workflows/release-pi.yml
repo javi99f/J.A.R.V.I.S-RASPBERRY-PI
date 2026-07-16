@@ -1,0 +1,63 @@
+name: Publicar actualización para Raspberry Pi
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias de comprobación
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2 portaudio19-dev libgl1
+          python -m pip install --upgrade pip
+          grep -v '^openwakeword==' requirements.txt > .requirements-ci.txt
+          python -m pip install -r .requirements-ci.txt
+          python -m pip install --no-deps openwakeword==0.6.0
+
+      - name: Comprobar versión y pruebas
+        shell: bash
+        run: |
+          VERSION="$(tr -d '\r\n' < VERSION)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${VERSION}" ]]; then
+            echo "La etiqueta ${GITHUB_REF_NAME} no coincide con VERSION=${VERSION}."
+            exit 1
+          fi
+          python -m unittest discover -s tests -q
+
+      - name: Construir paquete verificado por SHA-256
+        run: python tools/build_pi_release.py --output dist-release --notes-file CHANGELOG.md
+
+      - name: Publicar GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist-release/jarvis-pi-arm64.zip \
+            dist-release/jarvis-pi-manifest.json \
+            --title "Jarvis ${GITHUB_REF_NAME}" \
+            --notes-file CHANGELOG.md
+
+      - name: Guardar paquete de prueba manual
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-pi-arm64
+          path: dist-release/

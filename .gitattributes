@@ -1,2 +1,8 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+assistantctl text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.example text eol=lf
+.env.example text eol=lf
+.gitignore text eol=lf
