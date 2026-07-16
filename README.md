@@ -1,4 +1,4 @@
-# JARVIS Personal Assistant
+# J.A.R.V.I.S RASPBERRY PI
 
 A Raspberry Pi voice assistant built for a vertical 800x1200 touchscreen. It uses a cinematic full-screen HUD, Gemini Live voice conversation, optional OpenRouter helper actions, optional Zernio social analytics, Pi device controls, and optional Home Assistant smart-home control.
 
@@ -210,7 +210,7 @@ Version 0.4.0 can check and install Raspberry Pi updates published through a
 public GitHub repository. Configure the repository in `.env`:
 
 ```env
-UPDATE_REPOSITORY=javi99f/Jarvis-Raspberry
+UPDATE_REPOSITORY=javi99f/J.A.R.V.I.S-RASPBERRY-PI
 UPDATE_ALLOW_PRERELEASE=0
 ```
 

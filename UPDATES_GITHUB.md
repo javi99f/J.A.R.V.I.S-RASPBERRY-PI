@@ -1,4 +1,4 @@
-# Actualizaciones remotas de Jarvis mediante GitHub
+# Actualizaciones remotas de J.A.R.V.I.S RASPBERRY PI mediante GitHub
 
 Jarvis 0.4.0 incorpora un actualizador para Raspberry Pi que consulta
 **GitHub Releases**. No ejecuta `git pull`, no modifica `.env` y no necesita
@@ -31,7 +31,7 @@ automáticamente.
 
 ## Preparar el repositorio por primera vez
 
-1. Crea en GitHub un repositorio llamado `Jarvis`. Para la primera etapa se
+1. Crea en GitHub un repositorio llamado `J.A.R.V.I.S-RASPBERRY-PI`. Para la primera etapa se
    recomienda que sea público: la Raspberry podrá consultar Releases sin
    almacenar un token con acceso al repositorio.
 2. Copia a ese repositorio todos los archivos de esta carpeta respetando
@@ -41,7 +41,7 @@ automáticamente.
 4. Configura una vez la Raspberry añadiendo a `~/Jarvis/.env`:
 
    ```env
-   UPDATE_REPOSITORY=javi99f/Jarvis-Raspberry
+   UPDATE_REPOSITORY=javi99f/J.A.R.V.I.S-RASPBERRY-PI
    UPDATE_ALLOW_PRERELEASE=0
    ```
 
