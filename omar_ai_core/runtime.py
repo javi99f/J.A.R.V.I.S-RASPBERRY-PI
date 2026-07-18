@@ -326,6 +326,7 @@ class JarvisLive:
         self._pending_update: ReleaseInfo | None = None
         self._restart_requested = False
         self._restart_fallback_started = False
+        self._microphone_available: bool | None = None
         self.wake_gate = WakeWordGate(
             mode=get_secret("WAKE_MODE", "wakeword").lower(),
             threshold=float(get_secret("WAKE_THRESHOLD", "0.55")),
@@ -739,6 +740,7 @@ class JarvisLive:
             ):
                 print("[JARVIS] ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â¤ Mic stream open")
                 while True:
+                    self._microphone_available = True
                     self._sync_external_listening_state()
                     await asyncio.sleep(0.1)
         except Exception as e:
@@ -812,6 +814,27 @@ class JarvisLive:
             print(f"[JARVIS] ÃƒÂ¢Ã‚ÂÃ…â€™ Recv: {e}")
             traceback.print_exc()
             raise
+
+    async def _listen_audio_resilient(self):
+        """Keep Gemini's text channel alive when audio input is unavailable."""
+        while True:
+            try:
+                await self._listen_audio()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                first_failure = self._microphone_available is not False
+                self._microphone_available = False
+                print(f"[JARVIS] Microphone unavailable; text mode active: {exc}")
+                if first_failure:
+                    self.ui.write_log(
+                        "WARN: Microphone unavailable. Text commands remain active; "
+                        "connect or configure INPUT_DEVICE to restore voice input."
+                    )
+                # Retry quietly so hot-plugging a microphone restores voice
+                # without restarting Jarvis, but never disconnect Gemini.
+                await asyncio.sleep(5.0)
 
     async def _play_audio(self):
         print("[JARVIS] ?? Play started")
@@ -899,7 +922,7 @@ class JarvisLive:
                     self.ui.write_log(f"SYS: JARVIS online; {mode_msg}.")
 
                     tg.create_task(self._send_realtime())
-                    tg.create_task(self._listen_audio())
+                    tg.create_task(self._listen_audio_resilient())
                     tg.create_task(self._process_mic_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
