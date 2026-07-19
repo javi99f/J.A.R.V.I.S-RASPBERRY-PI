@@ -986,7 +986,7 @@ class JarvisLive:
     async def _listen_audio_resilient(self):
         """Keep Gemini's text channel alive when audio input is unavailable."""
         while True:
-            if self._audio_backend_refreshing:
+            if getattr(self, "_audio_backend_refreshing", False):
                 await asyncio.sleep(0.05)
                 continue
             try:
