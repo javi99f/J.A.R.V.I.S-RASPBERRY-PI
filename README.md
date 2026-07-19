@@ -206,7 +206,7 @@ sudo reboot
 
 ## Remote Updates
 
-Version 0.4.0 can check and install Raspberry Pi updates published through a
+Version 0.5.0 can check and install Raspberry Pi updates published through a
 public GitHub repository. Configure the repository in `.env`:
 
 ```env
@@ -218,6 +218,17 @@ Then type or say "Busca actualizaciones de Jarvis", or press `UPDATE` on the
 Pi interface. Installation always requires explicit confirmation. Local keys,
 memory, visual settings, and audio configuration are preserved. See
 `UPDATES_GITHUB.md` for the publishing and recovery workflow.
+
+## Touch Settings
+
+Press `AJUSTES` in the bottom bar to open the Raspberry Pi settings surface:
+
+- `HISTORIAL` shows saved user requests, Jarvis responses, and recent errors.
+- `AUDIO` selects the PortAudio input (microphone) and output (speaker).
+- `GENERAL` shows the local activation phrase: `Hey Jarvis`.
+
+Audio selections are saved in `.env` and applied without rebooting the Pi.
+Use `VOLVER A BUSCAR DISPOSITIVOS` after connecting a USB or Bluetooth device.
 
 ## Project Layout
 

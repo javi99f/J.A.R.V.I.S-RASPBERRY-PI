@@ -125,6 +125,27 @@ def write_env(gemini_api_key: str, openrouter_api_key: str, zernio_api_key: str 
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_audio_devices(input_device: int | None, output_device: int | None) -> None:
+    """Persist audio endpoints without overwriting API keys or Pi settings."""
+    existing = _parse_env_file(ENV_FILE)
+    updates = {
+        "INPUT_DEVICE": "" if input_device is None else str(int(input_device)),
+        "OUTPUT_DEVICE": "" if output_device is None else str(int(output_device)),
+    }
+    for key, value in updates.items():
+        if value:
+            existing[key] = value
+        else:
+            existing.pop(key, None)
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ENV_FILE.with_suffix(ENV_FILE.suffix + ".tmp")
+    temporary.write_text(
+        "\n".join(f"{key}={value}" for key, value in existing.items()) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, ENV_FILE)
+
+
 def is_configured() -> bool:
     return not _is_placeholder(get_secret("GEMINI_API_KEY"))
 

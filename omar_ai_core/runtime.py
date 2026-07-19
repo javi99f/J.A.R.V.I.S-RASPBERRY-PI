@@ -10,6 +10,7 @@ import traceback
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
 from google import genai
 from google.genai import types
@@ -58,6 +59,76 @@ SPEAKER_UNMUTE_ACTIONS = {"speaker_unmute", "unmute_speaker", "volume_unmute"}
 
 def _get_api_key() -> str:
     return require_secret("GEMINI_API_KEY")
+
+
+def _configured_audio_device(name: str) -> int | None:
+    value = get_secret(name)
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _audio_stream_format(
+    device: int | None,
+    direction: str,
+    target_rate: int,
+) -> tuple[int, int]:
+    """Choose a sample rate and channel count accepted by the selected endpoint."""
+    info = sd.query_devices(device, direction)
+    channel_key = "max_input_channels" if direction == "input" else "max_output_channels"
+    max_channels = max(1, int(info[channel_key]))
+    default_rate = int(round(float(info.get("default_samplerate") or target_rate)))
+    rates = list(dict.fromkeys((default_rate, target_rate, 48000, 44100)))
+    channels = list(dict.fromkeys((1, min(2, max_channels), max_channels)))
+    checker = sd.check_input_settings if direction == "input" else sd.check_output_settings
+    last_error: Exception | None = None
+    for rate in rates:
+        for channel_count in channels:
+            try:
+                checker(
+                    device=device,
+                    channels=channel_count,
+                    dtype="int16",
+                    samplerate=rate,
+                )
+                return rate, channel_count
+            except Exception as exc:
+                last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"No compatible {direction} audio format")
+
+
+def _convert_pcm16(
+    data: bytes,
+    source_rate: int,
+    target_rate: int,
+    source_channels: int = 1,
+    target_channels: int = 1,
+) -> bytes:
+    """Resample mono PCM and adapt it to the selected device channels."""
+    samples = np.frombuffer(data, dtype="<i2")
+    if samples.size == 0:
+        return b""
+    source_channels = max(1, int(source_channels))
+    usable = samples.size - (samples.size % source_channels)
+    if usable <= 0:
+        return b""
+    mono = samples[:usable].reshape(-1, source_channels).astype(np.float32).mean(axis=1)
+    if source_rate != target_rate and mono.size > 1:
+        target_length = max(1, int(round(mono.size * target_rate / source_rate)))
+        positions = np.arange(target_length, dtype=np.float32) * (source_rate / target_rate)
+        mono = np.interp(positions, np.arange(mono.size, dtype=np.float32), mono)
+    converted = np.clip(np.rint(mono), -32768, 32767).astype("<i2")
+    if target_channels > 1:
+        converted = np.repeat(converted[:, None], target_channels, axis=1).reshape(-1)
+    return converted.tobytes()
+
+
+def _restart_portaudio_backend() -> None:
+    sd._terminate()
+    sd._initialize()
 
 
 def _configure_live_transport() -> None:
@@ -327,6 +398,15 @@ class JarvisLive:
         self._restart_requested = False
         self._restart_fallback_started = False
         self._microphone_available: bool | None = None
+        self._speaker_available: bool | None = None
+        self._input_device = _configured_audio_device("INPUT_DEVICE")
+        self._output_device = _configured_audio_device("OUTPUT_DEVICE")
+        self._input_device_generation = 0
+        self._output_device_generation = 0
+        self._input_stream_open = False
+        self._output_stream_open = False
+        self._audio_backend_refreshing = False
+        self._audio_backend_refresh_task = None
         self.wake_gate = WakeWordGate(
             mode=get_secret("WAKE_MODE", "wakeword").lower(),
             threshold=float(get_secret("WAKE_THRESHOLD", "0.55")),
@@ -335,12 +415,82 @@ class JarvisLive:
         )
         self.ui.on_text_command = self._on_text_command
         self.ui.on_manual_activate = self._manual_activate
+        if hasattr(self.ui, "on_audio_devices_changed"):
+            self.ui.on_audio_devices_changed = self._on_audio_devices_changed
+        if hasattr(self.ui, "on_audio_refresh_requested"):
+            self.ui.on_audio_refresh_requested = self._on_audio_refresh_requested
         self.ui.muted = listening_state.get_listening_muted(False)
         if self.wake_gate.mode == "wakeword" and not self.wake_gate.available:
             self.ui.write_log(f"ERR: Local wake word unavailable: {self.wake_gate.error}")
             self.ui.write_log("SYS: Privacy fallback active; use typed commands until it is repaired.")
         elif self.wake_gate.error:
             self.ui.write_log(f"WARN: {self.wake_gate.error}")
+
+    def _on_audio_devices_changed(self, input_device, output_device) -> None:
+        try:
+            input_device = int(input_device) if input_device is not None else None
+        except (TypeError, ValueError):
+            input_device = None
+        try:
+            output_device = int(output_device) if output_device is not None else None
+        except (TypeError, ValueError):
+            output_device = None
+
+        if input_device != self._input_device:
+            self._input_device = input_device
+            self._input_device_generation += 1
+            self.ui.write_log("SYS: Dispositivo de entrada actualizado.")
+
+        if output_device != self._output_device:
+            self._output_device = output_device
+            self._output_device_generation += 1
+            self.ui.write_log("SYS: Dispositivo de salida actualizado.")
+            if self._loop is not None and self.audio_in_queue is not None:
+                self._loop.call_soon_threadsafe(self._request_output_stream_restart)
+
+    def _request_output_stream_restart(self) -> None:
+        if self.audio_in_queue is None:
+            return
+        while not self.audio_in_queue.empty():
+            try:
+                self.audio_in_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self.audio_in_queue.put_nowait(None)
+
+    def _on_audio_refresh_requested(self) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._schedule_audio_backend_refresh)
+
+    def _schedule_audio_backend_refresh(self) -> None:
+        if self._audio_backend_refresh_task and not self._audio_backend_refresh_task.done():
+            return
+        self._audio_backend_refresh_task = asyncio.create_task(
+            self._refresh_audio_backend()
+        )
+
+    async def _refresh_audio_backend(self) -> None:
+        self._audio_backend_refreshing = True
+        self._input_device_generation += 1
+        self._output_device_generation += 1
+        self._request_output_stream_restart()
+        deadline = time.monotonic() + 2.0
+        while (
+            self._input_stream_open or self._output_stream_open
+        ) and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        try:
+            if self._input_stream_open or self._output_stream_open:
+                raise RuntimeError("los flujos de audio no se cerraron a tiempo")
+            await asyncio.to_thread(_restart_portaudio_backend)
+            refresh_ui = getattr(self.ui, "refresh_audio_devices", None)
+            if refresh_ui is not None:
+                refresh_ui()
+            self.ui.write_log("SYS: Lista de dispositivos de audio actualizada.")
+        except Exception as exc:
+            self.ui.write_log(f"ERR: No se pudo actualizar el audio: {exc}")
+        finally:
+            self._audio_backend_refreshing = False
 
     def _manual_activate(self):
         if self.ui.muted:
@@ -713,12 +863,25 @@ class JarvisLive:
     async def _listen_audio(self):
         print("[JARVIS] ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â¤ Mic started")
         loop = asyncio.get_event_loop()
+        generation = self._input_device_generation
+        device = self._input_device
+        stream_rate, stream_channels = _audio_stream_format(
+            device, "input", SEND_SAMPLE_RATE
+        )
 
         def callback(indata, frames, time_info, status):
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking:
-                data = indata.tobytes()
+                data = _convert_pcm16(
+                    indata.tobytes(),
+                    stream_rate,
+                    SEND_SAMPLE_RATE,
+                    stream_channels,
+                    CHANNELS,
+                )
+                if not data:
+                    return
                 # Reuse the recognition PCM for visual analysis.  The UI does
                 # not open a second microphone stream or compete for access.
                 feed_visual = getattr(self.ui, "feed_input_audio", None)
@@ -731,21 +894,26 @@ class JarvisLive:
 
         try:
             with sd.InputStream(
-                device=int(get_secret("INPUT_DEVICE")) if get_secret("INPUT_DEVICE") else None,
-                samplerate=SEND_SAMPLE_RATE,
-                channels=CHANNELS,
+                device=device,
+                samplerate=stream_rate,
+                channels=stream_channels,
                 dtype="int16",
-                blocksize=CHUNK_SIZE,
+                blocksize=max(256, int(round(CHUNK_SIZE * stream_rate / SEND_SAMPLE_RATE))),
                 callback=callback,
             ):
                 print("[JARVIS] ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â¤ Mic stream open")
+                self._input_stream_open = True
                 while True:
+                    if generation != self._input_device_generation:
+                        return
                     self._microphone_available = True
                     self._sync_external_listening_state()
                     await asyncio.sleep(0.1)
         except Exception as e:
             print(f"[JARVIS] ÃƒÂ¢Ã‚ÂÃ…â€™ Mic: {e}")
             raise
+        finally:
+            self._input_stream_open = False
 
     async def _receive_audio(self):
         print("[JARVIS] ÃƒÂ°Ã…Â¸Ã¢â‚¬ËœÃ¢â‚¬Å¡ Recv started")
@@ -818,9 +986,12 @@ class JarvisLive:
     async def _listen_audio_resilient(self):
         """Keep Gemini's text channel alive when audio input is unavailable."""
         while True:
+            if self._audio_backend_refreshing:
+                await asyncio.sleep(0.05)
+                continue
             try:
                 await self._listen_audio()
-                return
+                continue
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -836,7 +1007,7 @@ class JarvisLive:
                 # without restarting Jarvis, but never disconnect Gemini.
                 await asyncio.sleep(5.0)
 
-    async def _play_audio(self):
+    async def _play_audio_legacy(self):
         print("[JARVIS] ?? Play started")
         loop = asyncio.get_event_loop()
 
@@ -885,6 +1056,104 @@ class JarvisLive:
             stream.stop()
             stream.close()
 
+    async def _play_audio(self):
+        """Play Gemini PCM through the selected endpoint and reopen on changes."""
+        generation = self._output_device_generation
+        device = self._output_device
+        stream_rate, stream_channels = _audio_stream_format(
+            device, "output", RECEIVE_SAMPLE_RATE
+        )
+        stream = sd.RawOutputStream(
+            device=device,
+            samplerate=stream_rate,
+            channels=stream_channels,
+            dtype="int16",
+            blocksize=CHUNK_SIZE,
+        )
+        try:
+            stream.start()
+            self._output_stream_open = True
+            self._speaker_available = True
+            info = sd.query_devices(stream.device)
+            print(
+                f"[JARVIS] Audio output ready: {info['name']} "
+                f"({stream_rate} Hz, {stream_channels} ch)"
+            )
+            while True:
+                chunk = await self.audio_in_queue.get()
+                if chunk is None or generation != self._output_device_generation:
+                    return
+                if self.ui.muted:
+                    continue
+                self.set_speaking(True)
+                feed_visual = getattr(self.ui, "feed_output_audio", None)
+                if feed_visual is not None:
+                    feed_visual(chunk, RECEIVE_SAMPLE_RATE)
+                device_chunk = _convert_pcm16(
+                    chunk,
+                    RECEIVE_SAMPLE_RATE,
+                    stream_rate,
+                    CHANNELS,
+                    stream_channels,
+                )
+                await asyncio.to_thread(stream.write, device_chunk)
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            self.audio_in_queue.get(), timeout=0.18
+                        )
+                    except asyncio.TimeoutError:
+                        self.set_speaking(False)
+                        break
+                    if chunk is None or generation != self._output_device_generation:
+                        return
+                    if self.ui.muted:
+                        self.set_speaking(False)
+                        break
+                    if feed_visual is not None:
+                        feed_visual(chunk, RECEIVE_SAMPLE_RATE)
+                    device_chunk = _convert_pcm16(
+                        chunk,
+                        RECEIVE_SAMPLE_RATE,
+                        stream_rate,
+                        CHANNELS,
+                        stream_channels,
+                    )
+                    await asyncio.to_thread(stream.write, device_chunk)
+        finally:
+            self.set_speaking(False)
+            self._output_stream_open = False
+            with contextlib.suppress(Exception):
+                stream.stop()
+            with contextlib.suppress(Exception):
+                stream.close()
+
+    async def _play_audio_resilient(self):
+        """Keep text mode alive and retry if the selected speaker is unavailable."""
+        while True:
+            if self._audio_backend_refreshing:
+                await asyncio.sleep(0.05)
+                continue
+            try:
+                await self._play_audio()
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                first_failure = self._speaker_available is not False
+                self._speaker_available = False
+                print(f"[JARVIS] Audio output unavailable: {exc}")
+                if first_failure:
+                    self.ui.write_log(
+                        "WARN: Salida de audio no disponible. Selecciona otra en Ajustes."
+                    )
+                while self.audio_in_queue and not self.audio_in_queue.empty():
+                    try:
+                        self.audio_in_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                await asyncio.sleep(5.0)
+
     async def run(self):
         _configure_live_transport()
         client = genai.Client(
@@ -925,7 +1194,7 @@ class JarvisLive:
                     tg.create_task(self._listen_audio_resilient())
                     tg.create_task(self._process_mic_audio())
                     tg.create_task(self._receive_audio())
-                    tg.create_task(self._play_audio())
+                    tg.create_task(self._play_audio_resilient())
                     
             except Exception as e:
                 print(f"[JARVIS] ÃƒÂ¢Ã…Â¡Ã‚Â ÃƒÂ¯Ã‚Â¸Ã‚Â {e}")

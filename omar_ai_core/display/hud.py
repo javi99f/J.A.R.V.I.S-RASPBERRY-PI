@@ -12,7 +12,16 @@ import time
 from pathlib import Path
 
 import psutil
-from omar_ai_core.settings import BASE_DIR, is_configured, is_desktop_mode, write_env
+import sounddevice as sd
+from omar_ai_core.history import append_history, read_diagnostics, read_history
+from omar_ai_core.settings import (
+    BASE_DIR,
+    get_secret,
+    is_configured,
+    is_desktop_mode,
+    write_audio_devices,
+    write_env,
+)
 
 from PyQt6.QtCore import (
     QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
@@ -24,9 +33,9 @@ from PyQt6.QtGui import (
     QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextEdit,
-    QVBoxLayout, QWidget, QProgressBar,
+    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
+    QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 from PyQt6.QtQuickWidgets import QQuickWidget
 
@@ -39,6 +48,34 @@ _LEFT_W  = 148
 _RIGHT_W = 340
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+
+
+def _device_id_from_setting(name: str) -> int | None:
+    value = get_secret(name)
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def enumerate_pi_audio_devices(
+    direction: str,
+    devices=None,
+) -> list[tuple[str, int]]:
+    """Return the usable PortAudio endpoints shown by the Pi settings panel."""
+    channel_key = "max_input_channels" if direction == "input" else "max_output_channels"
+    source = sd.query_devices() if devices is None else devices
+    result: list[tuple[str, int]] = []
+    for index, device in enumerate(source):
+        try:
+            channels = int(device.get(channel_key, 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if channels <= 0:
+            continue
+        name = str(device.get("name") or f"Dispositivo {index}").strip()
+        result.append((f"{index}: {name}", index))
+    return result
 
 
 def _run_hidden(command: list[str], **kwargs):
@@ -1023,6 +1060,7 @@ class LogWidget(QTextEdit):
         self._sig.emit(text)
 
     def _enqueue(self, text: str):
+        append_history(text)
         self._queue.append(text)
         if not self._typing:
             self._next()
@@ -1445,9 +1483,217 @@ class SetupOverlay(QWidget):
         self.done.emit(key, "", "desktop")
 
 
+class PiSettingsOverlay(QFrame):
+    """Touch-first settings surface for the 600x1024 Raspberry Pi display."""
+
+    audio_devices_changed = pyqtSignal(object, object)
+    audio_refresh_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            QFrame {{ background: {C.BG}; color: {C.TEXT}; }}
+            QLabel {{ color: {C.TEXT}; background: transparent; }}
+            QTabWidget::pane {{
+                border: 1px solid {C.BORDER_B}; background: {C.PANEL};
+            }}
+            QTabBar::tab {{
+                min-width: 110px; min-height: 36px; padding: 4px 8px;
+                color: {C.TEXT_MED}; background: {C.DARK};
+                border: 1px solid {C.BORDER};
+            }}
+            QTabBar::tab:selected {{ color: {C.WHITE}; border-color: {C.PRI}; }}
+            QPlainTextEdit {{
+                color: {C.TEXT}; background: {C.PANEL}; border: none;
+                font-family: 'Courier New'; font-size: 11px; padding: 8px;
+            }}
+            QComboBox {{
+                min-height: 42px; color: {C.WHITE}; background: #001018;
+                border: 1px solid {C.BORDER_B}; padding: 4px 8px;
+            }}
+            QComboBox QAbstractItemView {{
+                color: {C.WHITE}; background: {C.PANEL};
+                selection-background-color: {C.PRI_GHO};
+            }}
+            QPushButton {{
+                min-height: 40px; color: {C.PRI}; background: {C.PRI_GHO};
+                border: 1px solid {C.PRI_DIM}; padding: 3px 10px;
+            }}
+            QPushButton:pressed {{ background: {C.BORDER}; }}
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 14)
+        root.setSpacing(10)
+
+        heading = QHBoxLayout()
+        title = QLabel("AJUSTES DE JARVIS")
+        title.setFont(QFont("Courier New", 16, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI};")
+        heading.addWidget(title)
+        heading.addStretch()
+        close = QPushButton("CERRAR")
+        close.setFixedWidth(90)
+        close.clicked.connect(self.hide)
+        heading.addWidget(close)
+        root.addLayout(heading)
+
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self._build_history_tab()
+        self._build_audio_tab()
+        self._build_general_tab()
+
+    def _build_history_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 8, 6, 6)
+        layout.setSpacing(8)
+        self.history_tabs = QTabWidget()
+        self.conversation = QPlainTextEdit()
+        self.conversation.setReadOnly(True)
+        self.diagnostics = QPlainTextEdit()
+        self.diagnostics.setReadOnly(True)
+        self.history_tabs.addTab(self.conversation, "CONVERSACIÓN")
+        self.history_tabs.addTab(self.diagnostics, "ERRORES")
+        layout.addWidget(self.history_tabs, 1)
+        refresh = QPushButton("ACTUALIZAR HISTORIAL")
+        refresh.clicked.connect(self.refresh_history)
+        layout.addWidget(refresh)
+        self.tabs.addTab(page, "HISTORIAL")
+
+    def _build_audio_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 14, 12, 12)
+        layout.setSpacing(10)
+
+        input_label = QLabel("ENTRADA · Por dónde recibe tu voz")
+        input_label.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        layout.addWidget(input_label)
+        self.input_device = QComboBox()
+        layout.addWidget(self.input_device)
+
+        output_label = QLabel("SALIDA · Por dónde suena Jarvis")
+        output_label.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        layout.addWidget(output_label)
+        self.output_device = QComboBox()
+        layout.addWidget(self.output_device)
+
+        self.audio_status = QLabel("")
+        self.audio_status.setWordWrap(True)
+        self.audio_status.setStyleSheet(f"color: {C.TEXT_MED};")
+        layout.addWidget(self.audio_status)
+        layout.addStretch()
+
+        refresh = QPushButton("VOLVER A BUSCAR DISPOSITIVOS")
+        refresh.clicked.connect(self._request_audio_refresh)
+        layout.addWidget(refresh)
+        apply_button = QPushButton("APLICAR AUDIO")
+        apply_button.setStyleSheet(
+            f"color: {C.GREEN}; background: #00140a; border: 1px solid {C.GREEN};"
+        )
+        apply_button.clicked.connect(self.apply_audio_devices)
+        layout.addWidget(apply_button)
+        self.tabs.addTab(page, "AUDIO")
+
+    def _build_general_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(12)
+        wake_title = QLabel("PALABRA DE ACTIVACIÓN")
+        wake_title.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        wake_title.setStyleSheet(f"color: {C.TEXT_MED};")
+        layout.addWidget(wake_title)
+        wake_word = QLabel("HEY JARVIS")
+        wake_word.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wake_word.setFont(QFont("Courier New", 28, QFont.Weight.Bold))
+        wake_word.setStyleSheet(f"color: {C.PRI}; padding: 22px;")
+        layout.addWidget(wake_word)
+        detail = QLabel(
+            "El audio permanece local hasta detectar “Hey Jarvis”. Después, "
+            "la conversación permanece abierta durante unos segundos mientras sigues hablando."
+        )
+        detail.setWordWrap(True)
+        detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        detail.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 12px;")
+        layout.addWidget(detail)
+        layout.addStretch()
+        self.tabs.addTab(page, "GENERAL")
+
+    @staticmethod
+    def _fill_combo(
+        combo: QComboBox,
+        devices: list[tuple[str, int]],
+        selected: int | None,
+    ) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Predeterminado del sistema", None)
+        for label, device_id in devices:
+            combo.addItem(label, device_id)
+        selected_index = combo.findData(selected)
+        combo.setCurrentIndex(max(0, selected_index))
+        combo.blockSignals(False)
+
+    def refresh_history(self) -> None:
+        self.conversation.setPlainText(
+            read_history() or "Todavía no hay conversaciones registradas."
+        )
+        self.diagnostics.setPlainText(
+            read_diagnostics() or "No hay errores registrados."
+        )
+        self.conversation.moveCursor(self.conversation.textCursor().MoveOperation.End)
+        self.diagnostics.moveCursor(self.diagnostics.textCursor().MoveOperation.End)
+
+    def refresh_audio_devices(self) -> None:
+        selected_input = (
+            self.input_device.currentData()
+            if self.input_device.count()
+            else _device_id_from_setting("INPUT_DEVICE")
+        )
+        selected_output = (
+            self.output_device.currentData()
+            if self.output_device.count()
+            else _device_id_from_setting("OUTPUT_DEVICE")
+        )
+        try:
+            devices = sd.query_devices()
+            inputs = enumerate_pi_audio_devices("input", devices)
+            outputs = enumerate_pi_audio_devices("output", devices)
+            self._fill_combo(self.input_device, inputs, selected_input)
+            self._fill_combo(self.output_device, outputs, selected_output)
+            self.audio_status.setText(
+                f"Detectados: {len(inputs)} entradas y {len(outputs)} salidas."
+            )
+        except Exception as exc:
+            self.audio_status.setText(f"No se pudo consultar el audio: {exc}")
+
+    def apply_audio_devices(self) -> None:
+        input_device = self.input_device.currentData()
+        output_device = self.output_device.currentData()
+        write_audio_devices(input_device, output_device)
+        self.audio_devices_changed.emit(input_device, output_device)
+        self.audio_status.setText(
+            "Audio guardado. Jarvis está cambiando los dispositivos sin reiniciar."
+        )
+
+    def _request_audio_refresh(self) -> None:
+        self.audio_status.setText("Actualizando dispositivos de audio…")
+        self.audio_refresh_requested.emit()
+        QTimer.singleShot(700, self.refresh_audio_devices)
+
+    def refresh_all(self) -> None:
+        self.refresh_history()
+        self.refresh_audio_devices()
+
+
 class MainWindow(QMainWindow):
     _log_sig   = pyqtSignal(str)
     _state_sig = pyqtSignal(str)
+    _audio_refresh_sig = pyqtSignal()
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1500,8 +1746,11 @@ class MainWindow(QMainWindow):
 
         self.on_text_command  = None
         self.on_manual_activate = None
+        self.on_audio_devices_changed = None
+        self.on_audio_refresh_requested = None
         self._muted           = False
         self._current_file: str | None = None
+        self._settings_overlay: PiSettingsOverlay | None = None
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -1547,6 +1796,7 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self._audio_refresh_sig.connect(self._refresh_audio_settings)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -1577,6 +1827,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_dim_overlay"):
             self._dim_overlay.setGeometry(self.centralWidget().rect())
             self._dim_overlay.raise_()
+        if self._settings_overlay and self._settings_overlay.isVisible():
+            self._settings_overlay.setGeometry(self.centralWidget().rect())
+            self._settings_overlay.raise_()
 
     def _update_metrics(self):
         self.hud.metrics = _metrics.snapshot()
@@ -1596,6 +1849,8 @@ class MainWindow(QMainWindow):
         self._dim_overlay.setGeometry(self.centralWidget().rect())
         self._dim_overlay.set_brightness(pct)
         self._dim_overlay.raise_()
+        if self._settings_overlay and self._settings_overlay.isVisible():
+            self._settings_overlay.raise_()
 
     def _build_header(self) -> QWidget:
         w = GridHeader()
@@ -1666,6 +1921,15 @@ class MainWindow(QMainWindow):
         )
         row.addWidget(update)
 
+        settings = QPushButton("AJUSTES")
+        settings.setToolTip("Historial, audio y configuración de Jarvis")
+        settings.setFixedSize(74, 42)
+        settings.clicked.connect(self._show_settings)
+        settings.setStyleSheet(
+            f"background: #001019; color: {C.TEXT_MED}; border: 1px solid {C.BORDER};"
+        )
+        row.addWidget(settings)
+
         self._mute_btn = QPushButton("MIC")
         self._mute_btn.setFixedSize(72, 42)
         self._mute_btn.clicked.connect(self._toggle_mute)
@@ -1685,6 +1949,35 @@ class MainWindow(QMainWindow):
                 args=("Busca actualizaciones de Jarvis",),
                 daemon=True,
             ).start()
+
+    def _show_settings(self):
+        if self._settings_overlay is None:
+            self._settings_overlay = PiSettingsOverlay(self.centralWidget())
+            self._settings_overlay.audio_devices_changed.connect(
+                self._apply_audio_device_selection
+            )
+            self._settings_overlay.audio_refresh_requested.connect(
+                self._request_audio_refresh
+            )
+        self._settings_overlay.setGeometry(self.centralWidget().rect())
+        self._settings_overlay.refresh_all()
+        self._settings_overlay.show()
+        self._settings_overlay.raise_()
+
+    def _apply_audio_device_selection(self, input_device, output_device):
+        if self.on_audio_devices_changed:
+            self.on_audio_devices_changed(input_device, output_device)
+        self._log.append_log("SYS: Configuración de audio actualizada.")
+
+    def _request_audio_refresh(self):
+        if self.on_audio_refresh_requested:
+            self.on_audio_refresh_requested()
+        else:
+            self._refresh_audio_settings()
+
+    def _refresh_audio_settings(self):
+        if self._settings_overlay is not None:
+            self._settings_overlay.refresh_audio_devices()
 
     def _tick_clock(self):
         self._clock_lbl.setText(time.strftime("%I:%M %p").lstrip("0"))
@@ -2072,6 +2365,25 @@ class JarvisUI:
     @on_manual_activate.setter
     def on_manual_activate(self, cb):
         self._win.on_manual_activate = cb
+
+    @property
+    def on_audio_devices_changed(self):
+        return self._win.on_audio_devices_changed
+
+    @on_audio_devices_changed.setter
+    def on_audio_devices_changed(self, cb):
+        self._win.on_audio_devices_changed = cb
+
+    @property
+    def on_audio_refresh_requested(self):
+        return self._win.on_audio_refresh_requested
+
+    @on_audio_refresh_requested.setter
+    def on_audio_refresh_requested(self, cb):
+        self._win.on_audio_refresh_requested = cb
+
+    def refresh_audio_devices(self):
+        self._win._audio_refresh_sig.emit()
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)

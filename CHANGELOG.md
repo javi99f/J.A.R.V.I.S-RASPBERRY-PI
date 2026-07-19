@@ -1,5 +1,17 @@
 # Historial de versiones
 
+## 0.5.0
+
+- Nueva pestaña táctil `AJUSTES` adaptada a la pantalla vertical 600x1024.
+- Historial persistente de órdenes, respuestas y mensajes del sistema.
+- Pestaña de diagnóstico con los errores recientes del runtime.
+- Selección de entrada de audio para elegir por dónde recibe la voz.
+- Selección de salida de audio para elegir por dónde suena Jarvis.
+- Cambio de dispositivos de audio sin reiniciar la Raspberry Pi.
+- Búsqueda de dispositivos conectados después de iniciar Jarvis.
+- Compatibilidad automática con dispositivos USB de 44,1 y 48 kHz.
+- La interfaz muestra claramente la wake word `Hey Jarvis`.
+
 ## 0.4.0
 
 - Añadido actualizador remoto para Raspberry Pi mediante GitHub Releases.
@@ -11,4 +23,3 @@
 - Orden natural `busca actualizaciones` y herramienta de instalación con confirmación.
 - Botón `UPDATE` en la interfaz táctil de Raspberry Pi.
 - Reinicio controlado de Jarvis sin cerrar la sesión gráfica.
-
