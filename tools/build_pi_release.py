@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = ROOT / "dist-release"
 PACKAGE_NAME = "jarvis-pi-arm64.zip"
 MANIFEST_NAME = "jarvis-pi-manifest.json"
+RELEASE_NOTES_NAME = "jarvis-release-notes.md"
 ROOT_FILES = {
     ".env.example",
     "VERSION",
@@ -45,6 +46,18 @@ def _version() -> str:
     if not version or version.startswith("v"):
         raise SystemExit("VERSION debe contener solo X.Y.Z, sin la letra v.")
     return version
+
+
+def release_notes_for_version(notes: str, version: str) -> str:
+    heading = f"## Cambios para la version {version}"
+    start = notes.find(heading)
+    if start < 0:
+        raise SystemExit(f"Falta la sección exacta de notas: {heading}")
+    next_heading = notes.find("\n## ", start + len(heading))
+    selected = notes[start: next_heading if next_heading >= 0 else None].strip()
+    if not any(line.startswith("- ") for line in selected.splitlines()):
+        raise SystemExit(f"La sección {heading} no contiene cambios en formato de lista.")
+    return selected + "\n"
 
 
 def _release_files() -> list[Path]:
@@ -82,6 +95,7 @@ def build(output: Path, notes: str) -> tuple[Path, Path]:
     output.mkdir(parents=True, exist_ok=True)
     package_path = output / PACKAGE_NAME
     manifest_path = output / MANIFEST_NAME
+    release_notes = release_notes_for_version(notes, _version())
     with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
         for path in _release_files():
             relative = path.relative_to(ROOT).as_posix()
@@ -97,12 +111,13 @@ def build(output: Path, notes: str) -> tuple[Path, Path]:
         "sha256": digest,
         "size": package_path.stat().st_size,
         "requires_restart": True,
-        "notes": notes.strip(),
+        "notes": release_notes.strip(),
         "built_at": datetime.now(timezone.utc).isoformat(),
     }
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    (output / RELEASE_NOTES_NAME).write_text(release_notes, encoding="utf-8")
     return package_path, manifest_path
 
 
