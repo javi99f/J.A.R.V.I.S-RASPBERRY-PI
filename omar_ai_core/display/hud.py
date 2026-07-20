@@ -14,6 +14,11 @@ from pathlib import Path
 import psutil
 import sounddevice as sd
 from omar_ai_core.history import append_history, read_diagnostics, read_history
+from omar_ai_core.developer import (
+    SUPPORTED_VOICES,
+    configured_voice,
+    read_personality_style,
+)
 from omar_ai_core.settings import (
     BASE_DIR,
     get_secret,
@@ -34,6 +39,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QInputDialog,
     QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -97,6 +103,7 @@ class C:
     PRI_GHO   = "#001f2e"
     ACC       = "#ff6b00"
     ACC2      = "#ffcc00"
+    AMBER     = ACC2
     GREEN     = "#00ff88"
     GREEN_D   = "#00aa55"
     RED       = "#ff3355"
@@ -1488,9 +1495,11 @@ class PiSettingsOverlay(QFrame):
 
     audio_devices_changed = pyqtSignal(object, object)
     audio_refresh_requested = pyqtSignal()
+    persona_settings_changed = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._developer_unlocked = False
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(f"""
             QFrame {{ background: {C.BG}; color: {C.TEXT}; }}
@@ -1543,6 +1552,7 @@ class PiSettingsOverlay(QFrame):
         root.addWidget(self.tabs, 1)
         self._build_history_tab()
         self._build_audio_tab()
+        self._build_persona_tab()
         self._build_general_tab()
 
     def _build_history_tab(self) -> None:
@@ -1614,14 +1624,96 @@ class PiSettingsOverlay(QFrame):
         layout.addWidget(wake_word)
         detail = QLabel(
             "El audio permanece local hasta detectar “Hey Jarvis”. Después, "
-            "la conversación permanece abierta durante unos segundos mientras sigues hablando."
+            "cuando Jarvis termina de hablar mantiene una escucha contextual de 5 segundos."
         )
         detail.setWordWrap(True)
         detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 12px;")
         layout.addWidget(detail)
+        developer = QLabel(
+            "MODO DESARROLLADOR\nDi “Hey Jarvis, modo desarrollador”. Jarvis solicitará "
+            "la contraseña por escrito y de forma oculta. La sesión autorizada dura 30 minutos."
+        )
+        developer.setWordWrap(True)
+        developer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        developer.setStyleSheet(f"color: {C.AMBER}; font-size: 11px; padding: 12px;")
+        layout.addWidget(developer)
         layout.addStretch()
         self.tabs.addTab(page, "GENERAL")
+
+    def _build_persona_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 12, 10, 10)
+        layout.setSpacing(8)
+
+        self.persona_status = QLabel("")
+        self.persona_status.setWordWrap(True)
+        layout.addWidget(self.persona_status)
+
+        label = QLabel("FORMA DE HABLAR Y PERSONALIDAD")
+        label.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        layout.addWidget(label)
+        self.personality_style = QPlainTextEdit()
+        self.personality_style.setPlaceholderText(
+            "Ejemplo: Habla en español, con tono elegante, calmado y ligeramente irónico. "
+            "Llámame señor y evita respuestas demasiado largas."
+        )
+        self.personality_style.setMaximumHeight(210)
+        layout.addWidget(self.personality_style)
+
+        voice_label = QLabel("VOZ DE GEMINI LIVE")
+        voice_label.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        layout.addWidget(voice_label)
+        self.voice_select = QComboBox()
+        for voice in SUPPORTED_VOICES:
+            self.voice_select.addItem(voice)
+        layout.addWidget(self.voice_select)
+
+        hint = QLabel(
+            "Charon es informativa; Kore y Orus son firmes; Puck y Laomedeia son más animadas; "
+            "Gacrux es madura; Sulafat es cálida. El cambio reinicia solamente Jarvis."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 10px;")
+        layout.addWidget(hint)
+        layout.addStretch()
+
+        self.save_persona = QPushButton("GUARDAR PERSONALIDAD Y VOZ")
+        self.save_persona.clicked.connect(self._save_persona_settings)
+        layout.addWidget(self.save_persona)
+        self.tabs.addTab(page, "PERSONA")
+        self.set_developer_unlocked(False)
+
+    def set_developer_unlocked(self, active: bool) -> None:
+        self._developer_unlocked = bool(active)
+        self.personality_style.setEnabled(active)
+        self.voice_select.setEnabled(active)
+        self.save_persona.setEnabled(active)
+        if active:
+            self.persona_status.setText(
+                "MODO DESARROLLADOR ACTIVO · Los cambios sensibles están desbloqueados."
+            )
+            self.persona_status.setStyleSheet(f"color: {C.GREEN};")
+        else:
+            self.persona_status.setText(
+                "BLOQUEADO · Di “Hey Jarvis, modo desarrollador” y escribe la contraseña."
+            )
+            self.persona_status.setStyleSheet(f"color: {C.AMBER};")
+
+    def refresh_persona(self) -> None:
+        self.personality_style.setPlainText(read_personality_style())
+        index = self.voice_select.findText(configured_voice())
+        self.voice_select.setCurrentIndex(max(0, index))
+
+    def _save_persona_settings(self) -> None:
+        if not self._developer_unlocked:
+            return
+        self.persona_settings_changed.emit(
+            self.personality_style.toPlainText().strip(),
+            self.voice_select.currentText(),
+        )
+        self.persona_status.setText("Guardando cambios y reiniciando Jarvis…")
 
     @staticmethod
     def _fill_combo(
@@ -1688,12 +1780,15 @@ class PiSettingsOverlay(QFrame):
     def refresh_all(self) -> None:
         self.refresh_history()
         self.refresh_audio_devices()
+        self.refresh_persona()
 
 
 class MainWindow(QMainWindow):
     _log_sig   = pyqtSignal(str)
     _state_sig = pyqtSignal(str)
     _audio_refresh_sig = pyqtSignal()
+    _password_request_sig = pyqtSignal(object)
+    _developer_status_sig = pyqtSignal(bool)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1748,9 +1843,11 @@ class MainWindow(QMainWindow):
         self.on_manual_activate = None
         self.on_audio_devices_changed = None
         self.on_audio_refresh_requested = None
+        self.on_persona_settings_changed = None
         self._muted           = False
         self._current_file: str | None = None
         self._settings_overlay: PiSettingsOverlay | None = None
+        self._developer_unlocked = False
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -1797,6 +1894,8 @@ class MainWindow(QMainWindow):
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._audio_refresh_sig.connect(self._refresh_audio_settings)
+        self._password_request_sig.connect(self._handle_password_request)
+        self._developer_status_sig.connect(self._apply_developer_status)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -1959,8 +2058,12 @@ class MainWindow(QMainWindow):
             self._settings_overlay.audio_refresh_requested.connect(
                 self._request_audio_refresh
             )
+            self._settings_overlay.persona_settings_changed.connect(
+                self._apply_persona_settings
+            )
         self._settings_overlay.setGeometry(self.centralWidget().rect())
         self._settings_overlay.refresh_all()
+        self._settings_overlay.set_developer_unlocked(self._developer_unlocked)
         self._settings_overlay.show()
         self._settings_overlay.raise_()
 
@@ -1978,6 +2081,34 @@ class MainWindow(QMainWindow):
     def _refresh_audio_settings(self):
         if self._settings_overlay is not None:
             self._settings_overlay.refresh_audio_devices()
+
+    def _apply_persona_settings(self, personality: str, voice: str):
+        if self.on_persona_settings_changed:
+            self.on_persona_settings_changed(personality, voice)
+
+    def _apply_developer_status(self, active: bool):
+        self._developer_unlocked = bool(active)
+        if self._settings_overlay is not None:
+            self._settings_overlay.set_developer_unlocked(self._developer_unlocked)
+
+    def _handle_password_request(self, request: dict):
+        try:
+            password, accepted = QInputDialog.getText(
+                self,
+                "Modo desarrollador",
+                "Introduce la contraseña de desarrollador:",
+                QLineEdit.EchoMode.Password,
+            )
+            request["password"] = password if accepted else None
+        finally:
+            request["event"].set()
+
+    def request_developer_password(self):
+        request = {"event": threading.Event(), "password": None}
+        self._password_request_sig.emit(request)
+        if not request["event"].wait(timeout=180):
+            return None
+        return request["password"]
 
     def _tick_clock(self):
         self._clock_lbl.setText(time.strftime("%I:%M %p").lstrip("0"))
@@ -2384,6 +2515,20 @@ class JarvisUI:
 
     def refresh_audio_devices(self):
         self._win._audio_refresh_sig.emit()
+
+    @property
+    def on_persona_settings_changed(self):
+        return self._win.on_persona_settings_changed
+
+    @on_persona_settings_changed.setter
+    def on_persona_settings_changed(self, cb):
+        self._win.on_persona_settings_changed = cb
+
+    def request_developer_password(self):
+        return self._win.request_developer_password()
+
+    def set_developer_unlocked(self, active: bool):
+        self._win._developer_status_sig.emit(bool(active))
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)

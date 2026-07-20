@@ -73,6 +73,11 @@ class WakeWordGate:
     def activate(self) -> None:
         self._active_until = time.monotonic() + self.conversation_seconds
 
+    def activate_for(self, seconds: float) -> None:
+        """Open the privacy gate for an explicit short follow-up window."""
+        if self.mode != "continuous":
+            self._active_until = time.monotonic() + max(0.5, float(seconds))
+
     def extend_conversation(self) -> None:
         if self.active:
             self.activate()

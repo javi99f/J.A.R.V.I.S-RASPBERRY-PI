@@ -1,6 +1,6 @@
 # J.A.R.V.I.S RASPBERRY PI
 
-A Raspberry Pi voice assistant built for a vertical 800x1200 touchscreen. It uses a cinematic full-screen HUD, Gemini Live voice conversation, optional OpenRouter helper actions, optional Zernio social analytics, Pi device controls, and optional Home Assistant smart-home control.
+A Raspberry Pi voice assistant built for a vertical 600x1024 touchscreen. It uses a cinematic full-screen HUD, Gemini Live voice conversation, optional OpenRouter helper actions, optional Zernio social analytics, Pi device controls, and optional Home Assistant smart-home control.
 
 This customized branch adds a privacy-preserving local `Hey Jarvis` wake word,
 a Siri-style follow-up conversation window, explicit audio-device selection,
@@ -12,9 +12,11 @@ This project is intentionally Pi-first. It does not include desktop automation, 
 ## Features
 
 - Real-time voice conversation through Gemini Live
-- Full-screen PyQt6 HUD for a 10.1-inch vertical Raspberry Pi touchscreen
+- Full-screen PyQt6 HUD for a 600x1024 vertical Raspberry Pi touchscreen
 - Local wake-word standby; room audio is not sent to Gemini until activation
-- Configurable follow-up conversation window (12 seconds by default)
+- Five-second contextual follow-up window after every Jarvis response
+- Password-protected developer diagnostics and approved sensitive settings
+- Touch settings for persistent history, audio routing, personality, and Gemini Live voice
 - Speaker volume control, speaker mute/unmute, and optional generic Bluetooth reconnect helper
 - Assistant listening mute/unmute with voice-safe wake phrases
 - UI brightness dimming for HDMI touchscreens that do not expose Linux backlight control
@@ -26,7 +28,7 @@ This project is intentionally Pi-first. It does not include desktop automation, 
 ## Hardware You Need
 
 - Raspberry Pi running Raspberry Pi OS with a desktop session
-- 10.1-inch vertical display, recommended resolution 800x1200
+- Vertical touchscreen with a 600x1024 logical resolution
 - USB microphone
 - Speaker output through USB, HDMI, Bluetooth, or 3.5 mm audio
 - Internet access
@@ -84,7 +86,23 @@ chmod +x launch_assistant.sh
 
 ## Configure The Display
 
-The HUD is designed for a portrait 800x1200 screen. If your display opens sideways, rotate it in Raspberry Pi OS display settings or set the display orientation from your Pi's screen configuration tool.
+The HUD is designed for a portrait 600x1024 desktop obtained by rotating the physical 1024x600 panel. If your display opens sideways, rotate it in Raspberry Pi OS display settings or set the display orientation from your Pi's screen configuration tool.
+
+## Developer Mode, Personality And Voice
+
+Say `Hey Jarvis, modo desarrollador`. Jarvis opens a local masked text dialog;
+the password is verified on the Raspberry Pi and is never sent to Gemini. The
+authorized session lasts 30 minutes. The initial password is the one selected
+privately by the owner; change its SHA-256 value in `.env` before sharing the device.
+
+After unlocking, open `AJUSTES` → `PERSONA` to edit speaking style and choose a
+Gemini Live voice. The base behavior remains in
+`omar_ai_core/persona/system_prompt.txt`; user preferences are stored separately
+in `config/personality_style.txt`, so they cannot erase the essential safety and
+privacy rules. The selected voice is stored as `JARVIS_VOICE` in `.env`.
+
+The current voice is `Charon`. Other useful choices include `Kore` or `Orus`
+(firm), `Puck` or `Laomedeia` (upbeat), `Gacrux` (mature), and `Sulafat` (warm).
 
 The app uses an in-app dim overlay for brightness because many HDMI touchscreens do not expose a hardware backlight device to Linux.
 
@@ -206,7 +224,7 @@ sudo reboot
 
 ## Remote Updates
 
-Version 0.5.0 can check and install Raspberry Pi updates published through a
+Version 0.6.0 can check and install Raspberry Pi updates published through a
 public GitHub repository. Configure the repository in `.env`:
 
 ```env

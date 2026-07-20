@@ -1,5 +1,17 @@
 # Historial de versiones
 
+## 0.6.0
+
+- Modo desarrollador local activable diciendo `Hey Jarvis, modo desarrollador`.
+- Contraseña escrita y oculta; nunca se envía a Gemini ni aparece en el historial.
+- Sesión de desarrollador temporal de 30 minutos y bloqueo breve tras tres intentos fallidos.
+- Diagnóstico autónomo de errores recientes con credenciales redactadas.
+- Cambios sensibles limitados a opciones autorizadas, con confirmación explícita.
+- Nueva pestaña `PERSONA` para cambiar forma de hablar, personalidad y voz.
+- Selección entre las voces compatibles de Gemini Live; `Charon` sigue siendo la predeterminada.
+- Escucha contextual exacta de 5 segundos después de que Jarvis termina de hablar.
+- La personalidad del usuario se guarda aparte y no puede borrar las reglas esenciales de seguridad.
+
 ## 0.5.0
 
 - Nueva pestaña táctil `AJUSTES` adaptada a la pantalla vertical 600x1024.

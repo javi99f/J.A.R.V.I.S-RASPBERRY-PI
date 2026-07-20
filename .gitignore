@@ -5,6 +5,7 @@
 config/api_keys.json
 config/home_assistant.json
 config/brightness_state.json
+config/personality_style.txt
 config/home_assistant*.json
 config/*secret*.json
 config/*token*.json

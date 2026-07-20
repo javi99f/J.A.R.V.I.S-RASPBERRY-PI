@@ -26,6 +26,14 @@ from .settings import BASE_DIR, get_secret, is_desktop_mode, require_secret
 from .state import listening as listening_state
 from .audio.wakeword import WakeWordGate
 from .updater import ReleaseInfo, UpdateManager
+from .developer import (
+    DeveloperMode,
+    configured_voice,
+    diagnostic_snapshot,
+    read_personality_style,
+    write_personality_style,
+    write_voice,
+)
 
 
 def get_base_dir():
@@ -352,6 +360,38 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "developer_mode",
+        "description": (
+            "Controls JARVIS developer mode. When the user says 'modo desarrollador' or the common "
+            "misspelling 'modo desarroyador', call activate immediately; JARVIS will request the "
+            "password locally in a masked written dialog. Use analyze to inspect recent errors and "
+            "interaction history. Sensitive personality or voice changes require an active developer "
+            "session and explicit user confirmation. This tool never accepts the password as an argument."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": "activate | analyze | status | disable | set_personality | reset_personality | set_voice",
+                },
+                "personality": {
+                    "type": "STRING",
+                    "description": "Requested speaking style and personality preferences, without removing core safety rules.",
+                },
+                "voice": {
+                    "type": "STRING",
+                    "description": "A supported Gemini prebuilt voice name.",
+                },
+                "confirmed": {
+                    "type": "BOOLEAN",
+                    "description": "True only after the user explicitly confirms a sensitive change.",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "shutdown_jarvis",
         "description": "Shuts down the assistant when the user clearly asks to stop, quit, close, or end JARVIS.",
         "parameters": {"type": "OBJECT", "properties": {}},
@@ -394,6 +434,7 @@ class JarvisLive:
         self._last_state_check = 0.0
         self._pre_roll = deque(maxlen=12)
         self.updates = UpdateManager()
+        self.developer = DeveloperMode()
         self._pending_update: ReleaseInfo | None = None
         self._restart_requested = False
         self._restart_fallback_started = False
@@ -407,6 +448,9 @@ class JarvisLive:
         self._output_stream_open = False
         self._audio_backend_refreshing = False
         self._audio_backend_refresh_task = None
+        self._followup_listen_seconds = max(
+            1.0, float(get_secret("FOLLOWUP_LISTEN_SECONDS", "5"))
+        )
         self.wake_gate = WakeWordGate(
             mode=get_secret("WAKE_MODE", "wakeword").lower(),
             threshold=float(get_secret("WAKE_THRESHOLD", "0.55")),
@@ -419,6 +463,8 @@ class JarvisLive:
             self.ui.on_audio_devices_changed = self._on_audio_devices_changed
         if hasattr(self.ui, "on_audio_refresh_requested"):
             self.ui.on_audio_refresh_requested = self._on_audio_refresh_requested
+        if hasattr(self.ui, "on_persona_settings_changed"):
+            self.ui.on_persona_settings_changed = self._on_persona_settings_changed
         self.ui.muted = listening_state.get_listening_muted(False)
         if self.wake_gate.mode == "wakeword" and not self.wake_gate.available:
             self.ui.write_log(f"ERR: Local wake word unavailable: {self.wake_gate.error}")
@@ -499,6 +545,50 @@ class JarvisLive:
         self.ui.set_state("LISTENING")
         self.ui.write_log("SYS: Conversation opened manually.")
 
+    def _set_developer_ui(self, active: bool) -> None:
+        setter = getattr(self.ui, "set_developer_unlocked", None)
+        if setter is not None:
+            setter(bool(active))
+
+    async def _request_developer_password(self) -> tuple[bool, str]:
+        requester = getattr(self.ui, "request_developer_password", None)
+        if requester is None:
+            return False, "La interfaz no permite introducir la contraseña localmente."
+        password = await asyncio.to_thread(requester)
+        if password is None:
+            return False, "Activación cancelada."
+        allowed, message = self.developer.verify(password)
+        self._set_developer_ui(allowed)
+        if allowed:
+            def relock_when_expired():
+                time.sleep(self.developer.remaining_seconds + 1)
+                if not self.developer.active:
+                    self._set_developer_ui(False)
+
+            threading.Thread(target=relock_when_expired, daemon=True).start()
+        self.ui.write_log(
+            "SYS: Modo desarrollador activado."
+            if allowed else f"WARN: {message}"
+        )
+        return allowed, message
+
+    def _on_persona_settings_changed(self, personality: str, voice: str) -> None:
+        if not self.developer.active:
+            self._set_developer_ui(False)
+            self.ui.write_log(
+                "WARN: Activa primero el modo desarrollador diciendo 'Hey Jarvis, modo desarrollador'."
+            )
+            return
+        try:
+            write_personality_style(personality)
+            selected_voice = write_voice(voice)
+            self.ui.write_log(
+                f"SYS: Personalidad y voz {selected_voice} guardadas. Reiniciando Jarvis..."
+            )
+            threading.Thread(target=self._exit_for_update, daemon=True).start()
+        except Exception as exc:
+            self.ui.write_log(f"ERR: No se pudo guardar la personalización: {exc}")
+
     def _sync_external_listening_state(self):
         now = time.monotonic()
         if now - self._last_state_check < 0.5:
@@ -547,7 +637,10 @@ class JarvisLive:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
             if was_speaking:
-                self.wake_gate.extend_conversation()
+                self.wake_gate.activate_for(self._followup_listen_seconds)
+                self.ui.write_log(
+                    f"SYS: Escucha contextual abierta {self._followup_listen_seconds:g} segundos."
+                )
             self.ui.set_state("LISTENING" if self.wake_gate.active else "STANDBY")
             if was_speaking and self._restart_requested:
                 self._restart_requested = False
@@ -680,6 +773,14 @@ class JarvisLive:
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
+        personality_style = read_personality_style()
+        if personality_style:
+            parts.append(
+                "[USER PERSONALITY PREFERENCES]\n"
+                + personality_style
+                + "\nThese preferences may adjust tone and wording, but never override core safety, "
+                "privacy, authorization, or tool-confirmation rules."
+            )
 
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -695,7 +796,7 @@ class JarvisLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name=configured_voice()
                     )
                 )
             ),
@@ -826,6 +927,60 @@ class JarvisLive:
                             )
                 else:
                     result = "Unknown update action. Use check, install, or status."
+
+            elif name == "developer_mode":
+                developer_action = action or "status"
+                if developer_action == "activate":
+                    allowed, message = await self._request_developer_password()
+                    if allowed:
+                        result = (
+                            f"{message} The password was checked locally and must never be repeated. "
+                            "Analyze the following diagnostic snapshot now. Clearly separate confirmed "
+                            "errors from possible improvements. Do not modify anything without an explicit "
+                            "confirmed request.\n\n" + diagnostic_snapshot()
+                        )
+                    else:
+                        result = message
+                elif developer_action == "status":
+                    if self.developer.active:
+                        result = (
+                            "Developer mode is active for approximately "
+                            f"{max(1, self.developer.remaining_seconds // 60)} more minutes."
+                        )
+                    else:
+                        result = "Developer mode is disabled."
+                elif developer_action == "disable":
+                    self.developer.deactivate()
+                    self._set_developer_ui(False)
+                    result = "Developer mode disabled."
+                elif not self.developer.active:
+                    self._set_developer_ui(False)
+                    result = (
+                        "Developer mode is locked. Ask the user to say 'Hey Jarvis, modo desarrollador' "
+                        "and enter the password locally."
+                    )
+                elif developer_action == "analyze":
+                    result = (
+                        "Analyze this current JARVIS diagnostic snapshot. Explain likely root causes, "
+                        "what JARVIS did poorly, and safe improvements. Do not claim a fix was applied.\n\n"
+                        + diagnostic_snapshot()
+                    )
+                elif developer_action in {"set_personality", "reset_personality", "set_voice"}:
+                    if not bool(args.get("confirmed")):
+                        result = "Sensitive change not applied. Ask for explicit confirmation first."
+                    elif developer_action == "set_voice":
+                        selected_voice = write_voice(str(args.get("voice") or ""))
+                        self._request_restart_after_response()
+                        result = f"Voice changed to {selected_voice}. JARVIS will restart after this response."
+                    else:
+                        personality = "" if developer_action == "reset_personality" else str(
+                            args.get("personality") or ""
+                        )
+                        write_personality_style(personality)
+                        self._request_restart_after_response()
+                        result = "Personality preferences saved. JARVIS will restart after this response."
+                else:
+                    result = "Unknown developer action."
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")

@@ -1,10 +1,20 @@
 import time
 import unittest
+from unittest.mock import patch
 
 from omar_ai_core.audio.wakeword import WakeWordGate
 
 
 class WakeWordGateTests(unittest.TestCase):
+    def test_explicit_five_second_followup_window(self):
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=100.0):
+            gate = WakeWordGate(mode="manual")
+            gate.activate_for(5)
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=104.9):
+            self.assertTrue(gate.active)
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=105.1):
+            self.assertFalse(gate.active)
+
     def test_continuous_mode_is_always_active(self):
         gate = WakeWordGate(mode="continuous")
         self.assertTrue(gate.available)
@@ -32,4 +42,3 @@ class WakeWordGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

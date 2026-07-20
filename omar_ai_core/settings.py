@@ -29,6 +29,9 @@ KEY_ALIASES = {
     "WAKE_THRESHOLD": "wake_threshold",
     "CONVERSATION_TIMEOUT_SECONDS": "conversation_timeout_seconds",
     "VOICE_RMS_THRESHOLD": "voice_rms_threshold",
+    "FOLLOWUP_LISTEN_SECONDS": "followup_listen_seconds",
+    "JARVIS_VOICE": "jarvis_voice",
+    "DEVELOPER_PASSWORD_SHA256": "developer_password_sha256",
     "INPUT_DEVICE": "input_device",
     "OUTPUT_DEVICE": "output_device",
     "BLUETOOTH_SPEAKER_MAC": "bluetooth_speaker_mac",
@@ -114,7 +117,8 @@ def write_env(gemini_api_key: str, openrouter_api_key: str, zernio_api_key: str 
 
     for key in (
         "HOME_ASSISTANT_URL", "HOME_ASSISTANT_TOKEN", "WAKE_MODE", "WAKE_THRESHOLD",
-        "CONVERSATION_TIMEOUT_SECONDS", "VOICE_RMS_THRESHOLD", "INPUT_DEVICE",
+        "CONVERSATION_TIMEOUT_SECONDS", "FOLLOWUP_LISTEN_SECONDS",
+        "VOICE_RMS_THRESHOLD", "JARVIS_VOICE", "DEVELOPER_PASSWORD_SHA256", "INPUT_DEVICE",
         "OUTPUT_DEVICE", "BLUETOOTH_SPEAKER_MAC",
         "APP_MODE", "LIVE_OPEN_TIMEOUT_SECONDS", "LIVE_IP_MODE",
         "LIVE_FORCE_IPV4", "LIVE_USE_SYSTEM_PROXY", "DISPLAY_ROTATION",
@@ -134,6 +138,29 @@ def write_audio_devices(input_device: int | None, output_device: int | None) -> 
     }
     for key, value in updates.items():
         if value:
+            existing[key] = value
+        else:
+            existing.pop(key, None)
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = ENV_FILE.with_suffix(ENV_FILE.suffix + ".tmp")
+    temporary.write_text(
+        "\n".join(f"{key}={value}" for key, value in existing.items()) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, ENV_FILE)
+
+
+def write_runtime_settings(updates: dict[str, str | int | float | None]) -> None:
+    """Atomically update selected runtime settings while preserving secrets."""
+    existing = _parse_env_file(ENV_FILE)
+    for key, raw_value in updates.items():
+        key = str(key or "").strip().upper()
+        if not key or key not in KEY_ALIASES:
+            raise ValueError(f"Unsupported setting: {key}")
+        value = "" if raw_value is None else str(raw_value).strip()
+        if value:
+            if "\n" in value or "\r" in value:
+                raise ValueError(f"Setting {key} must be a single line")
             existing[key] = value
         else:
             existing.pop(key, None)
