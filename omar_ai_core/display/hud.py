@@ -40,7 +40,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QInputDialog,
+    QInputDialog, QMessageBox,
     QMainWindow, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -1797,6 +1797,8 @@ class MainWindow(QMainWindow):
     _audio_refresh_sig = pyqtSignal()
     _password_request_sig = pyqtSignal(object)
     _developer_status_sig = pyqtSignal(bool)
+    _spotify_state_sig = pyqtSignal(object)
+    _update_result_sig = pyqtSignal(object)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1852,10 +1854,13 @@ class MainWindow(QMainWindow):
         self.on_audio_devices_changed = None
         self.on_audio_refresh_requested = None
         self.on_persona_settings_changed = None
+        self.on_spotify_control = None
+        self.on_update_requested = None
         self._muted           = False
         self._current_file: str | None = None
         self._settings_overlay: PiSettingsOverlay | None = None
         self._developer_unlocked = False
+        self._update_request_id = 0
 
         central = QWidget()
         central.setStyleSheet(f"background: {C.BG};")
@@ -1868,6 +1873,7 @@ class MainWindow(QMainWindow):
 
         self.hud = create_jarvis_canvas()
         root.addWidget(self.hud, stretch=1)
+        root.addWidget(self._build_spotify_player())
 
         self._log = LogWidget()
         self._log.hide()
@@ -1904,6 +1910,8 @@ class MainWindow(QMainWindow):
         self._audio_refresh_sig.connect(self._refresh_audio_settings)
         self._password_request_sig.connect(self._handle_password_request)
         self._developer_status_sig.connect(self._apply_developer_status)
+        self._spotify_state_sig.connect(self._apply_spotify_state)
+        self._update_result_sig.connect(self._apply_update_result)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -1914,6 +1922,11 @@ class MainWindow(QMainWindow):
         sc_mute.activated.connect(self._toggle_mute)
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
+
+        self._spotify_tmr = QTimer(self)
+        self._spotify_tmr.timeout.connect(self._request_spotify_refresh)
+        self._spotify_tmr.start(8000)
+        QTimer.singleShot(1800, self._request_spotify_refresh)
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -2019,14 +2032,14 @@ class MainWindow(QMainWindow):
         )
         row.addWidget(activate)
 
-        update = QPushButton("UPDATE")
-        update.setToolTip("Buscar actualizaciones oficiales de Jarvis")
-        update.setFixedSize(68, 42)
-        update.clicked.connect(self._check_updates)
-        update.setStyleSheet(
+        self._update_btn = QPushButton("UPDATE")
+        self._update_btn.setToolTip("Buscar actualizaciones oficiales de Jarvis")
+        self._update_btn.setFixedSize(68, 42)
+        self._update_btn.clicked.connect(self._check_updates)
+        self._update_btn.setStyleSheet(
             f"background: #001019; color: {C.TEXT_MED}; border: 1px solid {C.BORDER};"
         )
-        row.addWidget(update)
+        row.addWidget(self._update_btn)
 
         settings = QPushButton("AJUSTES")
         settings.setToolTip("Historial, audio y configuración de Jarvis")
@@ -2049,13 +2062,164 @@ class MainWindow(QMainWindow):
             self.on_manual_activate()
 
     def _check_updates(self):
-        self._log.append_log("SYS: Checking for JARVIS updates...")
-        if self.on_text_command:
-            threading.Thread(
-                target=self.on_text_command,
-                args=("Busca actualizaciones de Jarvis",),
-                daemon=True,
-            ).start()
+        if not self.on_update_requested:
+            self._log.append_log("ERR: El actualizador local no está conectado.")
+            QMessageBox.warning(
+                self,
+                "Actualizador no disponible",
+                "El actualizador local no está conectado.",
+            )
+            return
+        self._update_request_id += 1
+        request_id = self._update_request_id
+        self._update_btn.setEnabled(False)
+        self._update_btn.setText("...")
+        self._log.append_log("SYS: Buscando actualizaciones seguras en GitHub...")
+
+        def worker():
+            try:
+                result = self.on_update_requested("check")
+            except Exception as exc:
+                result = {"status": "error", "message": str(exc)}
+            result = dict(result or {})
+            result["request_id"] = request_id
+            self._update_result_sig.emit(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+        QTimer.singleShot(
+            20_000,
+            lambda rid=request_id: self._update_request_timed_out(rid),
+        )
+
+    def _install_update(self):
+        self._update_request_id += 1
+        request_id = self._update_request_id
+        self._update_btn.setEnabled(False)
+        self._update_btn.setText("...")
+        self._log.append_log("SYS: Instalando la actualización; no desconectes la alimentación...")
+
+        def worker():
+            try:
+                result = self.on_update_requested("install")
+            except Exception as exc:
+                result = {"status": "error", "message": str(exc)}
+            result = dict(result or {})
+            result["request_id"] = request_id
+            self._update_result_sig.emit(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+        # Dependency installation can take minutes on a Raspberry Pi 4. This
+        # guard exists only to prevent a permanently frozen button.
+        QTimer.singleShot(
+            300_000,
+            lambda rid=request_id: self._update_request_timed_out(rid),
+        )
+
+    def _update_request_timed_out(self, request_id: int):
+        if request_id != self._update_request_id or self._update_btn.isEnabled():
+            return
+        # Invalidate a late worker result and return control to the user.
+        self._update_request_id += 1
+        self._update_btn.setText("UPDATE")
+        self._update_btn.setEnabled(True)
+        message = (
+            "La comprobación está tardando demasiado. "
+            "Comprueba la conexión a Internet y vuelve a intentarlo."
+        )
+        self._log.append_log("ERR: " + message)
+        QMessageBox.warning(self, "Actualización sin respuesta", message)
+
+    def _apply_update_result(self, result: dict):
+        request_id = (result or {}).get("request_id")
+        if request_id is not None and request_id != self._update_request_id:
+            return
+        status = str((result or {}).get("status") or "error")
+        message = str((result or {}).get("message") or "Resultado desconocido del actualizador.")
+        self._log.append_log(("ERR: " if status == "error" else "SYS: ") + message)
+        self._update_btn.setText("UPDATE")
+        self._update_btn.setEnabled(True)
+        if status == "available":
+            answer = QMessageBox.question(
+                self,
+                "Actualización disponible",
+                message + "\n\n¿Quieres instalarla ahora?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self._install_update()
+        elif status == "installed":
+            QMessageBox.information(self, "Actualización instalada", message)
+        elif status == "current":
+            QMessageBox.information(self, "Jarvis actualizado", message)
+        elif status == "error":
+            QMessageBox.warning(self, "Error de actualización", message)
+
+    def _build_spotify_player(self) -> QWidget:
+        panel = QFrame()
+        panel.setFixedHeight(72 if self._compact_portrait else 78)
+        panel.setStyleSheet(
+            f"QFrame {{ background: #000b10; border-top: 1px solid {C.BORDER}; }}"
+            f"QLabel {{ background: transparent; border: none; }}"
+            f"QPushButton {{ background: #00141c; color: {C.PRI}; border: 1px solid {C.BORDER}; "
+            "border-radius: 7px; font-size: 18px; font-weight: bold; }}"
+            f"QPushButton:pressed {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}"
+            "QPushButton:disabled { color: #35505a; border-color: #18303a; }"
+        )
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(12, 7, 12, 7)
+        row.setSpacing(8)
+
+        labels = QVBoxLayout()
+        labels.setSpacing(1)
+        self._spotify_track = QLabel("Spotify sin configurar")
+        self._spotify_track.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        self._spotify_track.setStyleSheet(f"color: {C.WHITE};")
+        self._spotify_artist = QLabel("Configúralo para reproducir música")
+        self._spotify_artist.setFont(QFont("Courier New", 8))
+        self._spotify_artist.setStyleSheet(f"color: {C.TEXT_MED};")
+        labels.addWidget(self._spotify_track)
+        labels.addWidget(self._spotify_artist)
+        row.addLayout(labels, 1)
+
+        self._spotify_previous = QPushButton("◀◀")
+        self._spotify_pause = QPushButton("▶")
+        self._spotify_next = QPushButton("▶▶")
+        for button in (self._spotify_previous, self._spotify_pause, self._spotify_next):
+            button.setFixedSize(52, 48)
+            button.setEnabled(False)
+            row.addWidget(button)
+        self._spotify_previous.clicked.connect(lambda: self._spotify_action("previous"))
+        self._spotify_pause.clicked.connect(self._spotify_toggle)
+        self._spotify_next.clicked.connect(lambda: self._spotify_action("next"))
+        self._spotify_is_playing = False
+        return panel
+
+    def _spotify_toggle(self):
+        self._spotify_action("pause" if self._spotify_is_playing else "resume")
+
+    def _spotify_action(self, action: str):
+        if not self.on_spotify_control:
+            return
+        for button in (self._spotify_previous, self._spotify_pause, self._spotify_next):
+            button.setEnabled(False)
+        threading.Thread(target=self.on_spotify_control, args=(action,), daemon=True).start()
+
+    def _request_spotify_refresh(self):
+        if self.on_spotify_control:
+            threading.Thread(target=self.on_spotify_control, args=("refresh",), daemon=True).start()
+
+    def _apply_spotify_state(self, state: dict):
+        state = state or {}
+        self._spotify_is_playing = bool(state.get("is_playing"))
+        self._spotify_track.setText(str(state.get("track") or "Spotify"))
+        artist = str(state.get("artist") or "")
+        device = str(state.get("device") or "")
+        self._spotify_artist.setText(" · ".join(part for part in (artist, device) if part))
+        self._spotify_pause.setText("Ⅱ" if self._spotify_is_playing else "▶")
+        enabled = bool(state.get("configured")) and bool(state.get("connected"))
+        for button in (self._spotify_previous, self._spotify_pause, self._spotify_next):
+            button.setEnabled(enabled)
 
     def _show_settings(self):
         if self._settings_overlay is None:
@@ -2531,6 +2695,25 @@ class JarvisUI:
     @on_persona_settings_changed.setter
     def on_persona_settings_changed(self, cb):
         self._win.on_persona_settings_changed = cb
+
+    @property
+    def on_spotify_control(self):
+        return self._win.on_spotify_control
+
+    @on_spotify_control.setter
+    def on_spotify_control(self, callback):
+        self._win.on_spotify_control = callback
+
+    def set_spotify_state(self, state: dict):
+        self._win._spotify_state_sig.emit(dict(state or {}))
+
+    @property
+    def on_update_requested(self):
+        return self._win.on_update_requested
+
+    @on_update_requested.setter
+    def on_update_requested(self, callback):
+        self._win.on_update_requested = callback
 
     def request_developer_password(self):
         return self._win.request_developer_password()

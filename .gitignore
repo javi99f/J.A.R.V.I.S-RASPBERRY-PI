@@ -11,6 +11,7 @@ config/home_assistant*.json
 config/*secret*.json
 config/*token*.json
 config/*credentials*.json
+config/spotify_token_cache.json
 config/*.local.json
 !config/*.example.json
 

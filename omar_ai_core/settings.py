@@ -24,6 +24,12 @@ KEY_ALIASES = {
     "ZERNIO_API_KEY": "zernio_api_key",
     "HOME_ASSISTANT_URL": "home_assistant_url",
     "HOME_ASSISTANT_TOKEN": "home_assistant_token",
+    "SPOTIFY_CLIENT_ID": "spotify_client_id",
+    "SPOTIFY_CLIENT_SECRET": "spotify_client_secret",
+    "SPOTIFY_REDIRECT_URI": "spotify_redirect_uri",
+    "SPOTIFY_DEVICE_NAME": "spotify_device_name",
+    "SPOTIFY_DEVICE_ID": "spotify_device_id",
+    "SPOTIFY_CACHE_PATH": "spotify_cache_path",
     "OS_SYSTEM": "os_system",
     "WAKE_MODE": "wake_mode",
     "WAKE_THRESHOLD": "wake_threshold",
@@ -117,7 +123,9 @@ def write_env(gemini_api_key: str, openrouter_api_key: str, zernio_api_key: str 
         lines.append(f"ZERNIO_API_KEY={existing['ZERNIO_API_KEY']}")
 
     for key in (
-        "HOME_ASSISTANT_URL", "HOME_ASSISTANT_TOKEN", "WAKE_MODE", "WAKE_THRESHOLD",
+        "HOME_ASSISTANT_URL", "HOME_ASSISTANT_TOKEN", "SPOTIFY_CLIENT_ID",
+        "SPOTIFY_CLIENT_SECRET", "SPOTIFY_REDIRECT_URI", "SPOTIFY_DEVICE_NAME",
+        "SPOTIFY_DEVICE_ID", "SPOTIFY_CACHE_PATH", "WAKE_MODE", "WAKE_THRESHOLD",
         "CONVERSATION_TIMEOUT_SECONDS", "FOLLOWUP_LISTEN_SECONDS",
         "VOICE_RMS_THRESHOLD", "JARVIS_VOICE", "DEVELOPER_PASSWORD_SHA256", "INPUT_DEVICE",
         "OUTPUT_DEVICE", "BLUETOOTH_SPEAKER_MAC",

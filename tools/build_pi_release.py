@@ -29,6 +29,8 @@ ROOT_FILES = {
     "configure_pi_display.sh",
     "assistantctl",
     "audio_check.py",
+    "configure_spotify.py",
+    "install_spotify_pi.sh",
     "start_assistant.py",
     "diagnose_pi_live.sh",
     "tools/diagnose_pi_live.py",

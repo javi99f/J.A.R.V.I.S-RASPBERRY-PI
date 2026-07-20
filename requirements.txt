@@ -9,3 +9,4 @@ psutil>=5.9,<8
 Pillow>=10,<13
 numpy>=1.26,<3
 openwakeword==0.6.0
+spotipy>=2.25,<3

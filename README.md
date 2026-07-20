@@ -190,6 +190,63 @@ Example commands:
 
 Supported Home Assistant entity domains include `light` and `switch`.
 
+## Spotify on the Raspberry Pi
+
+Spotify support has two local parts:
+
+- `Raspotify` makes the Raspberry appear as the Spotify Connect speaker named
+  `JARVIS Raspberry Pi` and sends music to the Pi's configured ALSA output.
+- `Spotipy` lets JARVIS search and control that real player through Spotify's
+  Web API. Playback control requires the app owner's active Spotify Premium account.
+
+Install the receiver and Python dependency once:
+
+```bash
+cd ~/Jarvis
+chmod +x install_spotify_pi.sh
+./install_spotify_pi.sh
+```
+
+Create a personal app in the Spotify Developer Dashboard and add this exact
+redirect URI to its settings:
+
+```text
+http://127.0.0.1:8888/callback
+```
+
+Then authorize JARVIS without placing secrets in shell history:
+
+```bash
+cd ~/Jarvis
+./.venv/bin/python configure_spotify.py
+```
+
+The helper stores the Client ID and Client Secret only in the ignored `.env`
+file and stores the refresh token in the ignored
+`config/spotify_token_cache.json` file. Never publish either file.
+
+Useful checks:
+
+```bash
+systemctl status raspotify --no-pager
+journalctl -u raspotify -n 50 --no-pager
+```
+
+Example commands:
+
+- "pon Blinding Lights en Spotify"
+- "pon música de Queen"
+- "pausa Spotify"
+- "pausa"
+- "siguiente canción"
+- "qué está sonando"
+- "pon el volumen al 40 por ciento" (changes the Raspberry Pi system volume)
+
+The portrait HUD shows a compact Spotify player below the central JARVIS
+circle. It displays the real track and artist and provides touch controls for
+previous, pause/resume, and next. Spoken volume requests always change the Pi's
+general output volume rather than a separate Spotify-only volume.
+
 ## Zernio Social Analytics Setup
 
 Zernio is optional. Add your key to `.env`:
@@ -265,6 +322,7 @@ Use `VOLVER A BUSCAR DISPOSITIVOS` after connecting a USB or Bluetooth device.
 - `omar_ai_core/display/hud.py` - touchscreen HUD
 - `omar_ai_core/tools/pi_device.py` - Pi speaker volume, brightness, mute, and Era 300 control
 - `omar_ai_core/tools/home_control.py` - Home Assistant lights and switches
+- `omar_ai_core/tools/spotify_control.py` - Spotify search, playback, device selection, and volume
 - `omar_ai_core/tools/social_metrics.py` - Zernio Instagram/TikTok analytics
 - `omar_ai_core/tools/web_lookup.py` - public lookup helper
 - `omar_ai_core/state/listening.py` - shared listening mute state for voice and SSH control

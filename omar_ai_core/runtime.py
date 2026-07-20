@@ -22,6 +22,7 @@ from .memory.store import (
 from .tools.web_lookup import web_search as web_search_action
 from .tools.pi_device import pi_controls
 from .tools.home_control import home_control
+from .tools.spotify_control import spotify_control, spotify_snapshot
 from .settings import BASE_DIR, get_secret, is_desktop_mode, require_secret
 from .state import listening as listening_state
 from .audio.wakeword import WakeWordGate
@@ -298,7 +299,8 @@ TOOL_DECLARATIONS = [
             "Controls this Raspberry Pi assistant appliance only. Use listening_mute/listening_unmute "
             "when the user asks JARVIS to mute itself, stop listening, wake up, or listen again. "
             "Use speaker_mute/speaker_unmute only when the user asks to mute or unmute sound, volume, "
-            "audio output, or speakers. Also controls volume, a configured Bluetooth speaker, and screen brightness. "
+            "audio output, or speakers. Every request about volume controls the Raspberry Pi system volume, "
+            "including while Spotify is playing. Also controls a configured Bluetooth speaker and screen brightness. "
             "Do not use for room lights, desktop apps, files, keyboard, mouse, or general computer automation."
         ),
         "parameters": {
@@ -339,6 +341,41 @@ TOOL_DECLARATIONS = [
                 "domain": {"type": "STRING", "description": "light | switch | any"},
                 "brightness": {"type": "INTEGER", "description": "Brightness percent for lights."},
                 "description": {"type": "STRING", "description": "Original user command."},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "spotify_player",
+        "description": (
+            "Controls Spotify playback on the Raspberry Pi through its configured Spotify Connect "
+            "receiver. Use for natural requests to play a song, artist, album, or playlist; pause, "
+            "resume, skip, go back, report the current track, and list or select Spotify devices. "
+            "A bare 'pausa', 'continúa', 'anterior', or 'siguiente' refers to Spotify playback. "
+            "Never use this tool for volume; all volume requests use pi_controls. "
+            "Do not claim music started unless this tool reports success."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "description": (
+                        "play | pause | resume | next | previous | current | devices | transfer"
+                    ),
+                },
+                "query": {
+                    "type": "STRING",
+                    "description": "Song, artist, album, playlist, or search phrase requested by the user.",
+                },
+                "content_type": {
+                    "type": "STRING",
+                    "description": "track | artist | album | playlist",
+                },
+                "device": {
+                    "type": "STRING",
+                    "description": "Optional Spotify Connect device name; normally omit to use the Raspberry Pi.",
+                },
             },
             "required": ["action"],
         },
@@ -422,7 +459,7 @@ TOOL_DECLARATIONS = [
 
 def _available_tool_declarations() -> list[dict]:
     if is_desktop_mode():
-        disabled = {"pi_controls", "social_insights", "jarvis_update"}
+        disabled = {"pi_controls", "social_insights", "jarvis_update", "spotify_player"}
         return [item for item in TOOL_DECLARATIONS if item.get("name") not in disabled]
     return TOOL_DECLARATIONS
 
@@ -438,6 +475,8 @@ class JarvisLive:
         self._loop          = None
         self._is_speaking   = False
         self._speaking_lock = threading.Lock()
+        self._spotify_control_lock = threading.Lock()
+        self._update_control_lock = threading.Lock()
         self._state_mtime   = 0.0
         self._last_state_check = 0.0
         self._pre_roll = deque(maxlen=12)
@@ -474,7 +513,14 @@ class JarvisLive:
             self.ui.on_audio_refresh_requested = self._on_audio_refresh_requested
         if hasattr(self.ui, "on_persona_settings_changed"):
             self.ui.on_persona_settings_changed = self._on_persona_settings_changed
-        self.ui.muted = listening_state.get_listening_muted(False)
+        if hasattr(self.ui, "on_spotify_control"):
+            self.ui.on_spotify_control = self._on_spotify_control
+        if hasattr(self.ui, "on_update_requested"):
+            self.ui.on_update_requested = self._on_update_requested
+        # Muting is a temporary privacy control for the current session. A
+        # previous shutdown must never leave the appliance muted on next boot.
+        listening_state.set_listening_muted(False)
+        self.ui.muted = False
         if self.wake_gate.mode == "wakeword" and not self.wake_gate.available:
             self.ui.write_log(f"ERR: Local wake word unavailable: {self.wake_gate.error}")
             self.ui.write_log("SYS: Privacy fallback active; use typed commands until it is repaired.")
@@ -674,6 +720,60 @@ class JarvisLive:
             self.session.send_realtime_input(text=text), self._loop
         )
         future.add_done_callback(self._text_send_finished)
+
+    def _on_spotify_control(self, action: str):
+        with self._spotify_control_lock:
+            if action != "refresh":
+                result = spotify_control({"action": action})
+                self.ui.write_log(f"SPOTIFY: {result}")
+            state = spotify_snapshot()
+            if hasattr(self.ui, "set_spotify_state"):
+                self.ui.set_spotify_state(state)
+            return state
+
+    def _on_update_requested(self, action: str) -> dict:
+        with self._update_control_lock:
+            if action == "check":
+                check = self.updates.check_for_updates()
+                if check.available and check.release:
+                    self._pending_update = check.release
+                    notes = check.release.notes.strip()
+                    detail = f"\n\n{notes[:700]}" if notes else ""
+                    return {
+                        "status": "available",
+                        "message": (
+                            f"Jarvis {check.release.version} está disponible; "
+                            f"tienes instalada la versión {check.current_version}.{detail}"
+                        ),
+                    }
+                self._pending_update = None
+                return {
+                    "status": "current",
+                    "message": f"Jarvis ya está actualizado en la versión {check.current_version}.",
+                }
+            if action == "install":
+                release = self._pending_update
+                if release is None:
+                    check = self.updates.check_for_updates()
+                    release = check.release if check.available else None
+                if release is None:
+                    return {"status": "current", "message": "Jarvis ya está actualizado."}
+                installed = self.updates.install(release)
+                self._pending_update = None
+
+                def restart_after_dialog():
+                    time.sleep(3)
+                    self._exit_for_update()
+
+                threading.Thread(target=restart_after_dialog, daemon=True).start()
+                return {
+                    "status": "installed",
+                    "message": (
+                        f"Jarvis {installed.installed_version} se instaló y validó correctamente. "
+                        "La aplicación se reiniciará ahora."
+                    ),
+                }
+            return {"status": "error", "message": f"Acción de actualización desconocida: {action}"}
 
     def _text_send_finished(self, future):
         try:
@@ -955,6 +1055,16 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: home_control(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "spotify_player":
+                if is_desktop_mode():
+                    result = "Spotify Connect control is currently available only on the Raspberry Pi edition."
+                    return types.FunctionResponse(id=fc.id, name=name, response={"result": result})
+                r = await loop.run_in_executor(None, lambda: spotify_control(parameters=args, player=self.ui))
+                result = r or "No Spotify result was returned."
+                state = await loop.run_in_executor(None, spotify_snapshot)
+                if hasattr(self.ui, "set_spotify_state"):
+                    self.ui.set_spotify_state(state)
+
             elif name == "jarvis_update":
                 if is_desktop_mode():
                     result = "Remote self-updates are currently available only on the Raspberry Pi edition."
@@ -1153,6 +1263,8 @@ class JarvisLive:
             persistent_changes = []
             if name == "home_control":
                 persistent_changes = [f"Home Assistant device state ({action or 'unknown'})"]
+            elif name == "spotify_player" and action not in {"status", "current", "currently_playing", "devices", "list_devices"}:
+                persistent_changes = [f"Spotify playback state ({action or 'unknown'})"]
             elif name == "pi_controls" and action not in {"status", "list"}:
                 persistent_changes = [f"Raspberry Pi device state ({action or 'unknown'})"]
             elif name == "jarvis_update" and action == "install" and "installed" in str(result).lower():
