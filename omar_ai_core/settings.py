@@ -27,6 +27,7 @@ KEY_ALIASES = {
     "OS_SYSTEM": "os_system",
     "WAKE_MODE": "wake_mode",
     "WAKE_THRESHOLD": "wake_threshold",
+    "WAKE_CONFIRM_FRAMES": "wake_confirm_frames",
     "CONVERSATION_TIMEOUT_SECONDS": "conversation_timeout_seconds",
     "VOICE_RMS_THRESHOLD": "voice_rms_threshold",
     "FOLLOWUP_LISTEN_SECONDS": "followup_listen_seconds",

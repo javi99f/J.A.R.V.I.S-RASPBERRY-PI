@@ -15,6 +15,44 @@ class WakeWordGateTests(unittest.TestCase):
         with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=105.1):
             self.assertFalse(gate.active)
 
+    def test_followup_window_cannot_be_extended_by_ambient_voice(self):
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=100.0):
+            gate = WakeWordGate(mode="manual")
+            gate.activate_for(5)
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=103.0):
+            gate.extend_conversation()
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=105.1):
+            self.assertFalse(gate.active)
+
+    def test_normal_conversation_can_still_be_extended(self):
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=100.0):
+            gate = WakeWordGate(mode="manual", conversation_seconds=12)
+            gate.activate()
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=110.0):
+            gate.extend_conversation()
+        with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=121.9):
+            self.assertTrue(gate.active)
+
+    def test_wakeword_requires_confirmation_unless_score_is_strong(self):
+        class FakeModel:
+            def __init__(self, scores):
+                self.scores = iter(scores)
+
+            def predict(self, _samples):
+                return {"hey jarvis": [next(self.scores)]}
+
+        frame = b"\0" * (WakeWordGate.FRAME_SAMPLES * 2)
+        gate = WakeWordGate(mode="manual", threshold=0.55, confirmation_frames=2)
+        gate.mode = "wakeword"
+        gate._model = FakeModel([0.60, 0.61])
+        self.assertFalse(gate.process(frame)[0])
+        self.assertTrue(gate.process(frame)[0])
+
+        strong = WakeWordGate(mode="manual", threshold=0.55, confirmation_frames=2)
+        strong.mode = "wakeword"
+        strong._model = FakeModel([0.80])
+        self.assertTrue(strong.process(frame)[0])
+
     def test_continuous_mode_is_always_active(self):
         gate = WakeWordGate(mode="continuous")
         self.assertTrue(gate.available)

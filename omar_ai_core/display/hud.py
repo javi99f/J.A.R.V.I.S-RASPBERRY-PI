@@ -17,6 +17,7 @@ from omar_ai_core.history import append_history, read_diagnostics, read_history
 from omar_ai_core.developer import (
     SUPPORTED_VOICES,
     configured_voice,
+    read_developer_audit,
     read_personality_style,
 )
 from omar_ai_core.settings import (
@@ -1565,8 +1566,11 @@ class PiSettingsOverlay(QFrame):
         self.conversation.setReadOnly(True)
         self.diagnostics = QPlainTextEdit()
         self.diagnostics.setReadOnly(True)
+        self.developer_audit = QPlainTextEdit()
+        self.developer_audit.setReadOnly(True)
         self.history_tabs.addTab(self.conversation, "CONVERSACIÓN")
         self.history_tabs.addTab(self.diagnostics, "ERRORES")
+        self.history_tabs.addTab(self.developer_audit, "ACCIONES DEV")
         layout.addWidget(self.history_tabs, 1)
         refresh = QPushButton("ACTUALIZAR HISTORIAL")
         refresh.clicked.connect(self.refresh_history)
@@ -1737,8 +1741,12 @@ class PiSettingsOverlay(QFrame):
         self.diagnostics.setPlainText(
             read_diagnostics() or "No hay errores registrados."
         )
+        self.developer_audit.setPlainText(
+            read_developer_audit() or "Todavía no hay acciones del modo desarrollador."
+        )
         self.conversation.moveCursor(self.conversation.textCursor().MoveOperation.End)
         self.diagnostics.moveCursor(self.diagnostics.textCursor().MoveOperation.End)
+        self.developer_audit.moveCursor(self.developer_audit.textCursor().MoveOperation.End)
 
     def refresh_audio_devices(self) -> None:
         selected_input = (

@@ -28,8 +28,10 @@ from .audio.wakeword import WakeWordGate
 from .updater import ReleaseInfo, UpdateManager
 from .developer import (
     DeveloperMode,
+    append_developer_audit,
     configured_voice,
     diagnostic_snapshot,
+    read_developer_audit,
     read_personality_style,
     write_personality_style,
     write_voice,
@@ -56,6 +58,11 @@ CHUNK_SIZE          = 1024
 WAKE_PATTERN = re.compile(
     r"\b(jarvis|assistant)\b.*\b(unmute|wake up|listen|start listening|resume listening|despierta|escucha|act[ií]vate)\b"
     r"|\b(unmute|wake up|listen|start listening|resume listening|despierta|escucha|act[ií]vate)\b.*\b(jarvis|assistant)\b",
+    re.IGNORECASE,
+)
+
+SELF_CHANGE_MEMORY_PATTERN = re.compile(
+    r"\b(jarvis|assistant|asistente|error|mistake|fallo|correg|fix|improv|mejor|siri|wake|activaci[oó]n)\w*\b",
     re.IGNORECASE,
 )
 
@@ -366,14 +373,15 @@ TOOL_DECLARATIONS = [
             "misspelling 'modo desarroyador', call activate immediately; JARVIS will request the "
             "password locally in a masked written dialog. Use analyze to inspect recent errors and "
             "interaction history. Sensitive personality or voice changes require an active developer "
-            "session and explicit user confirmation. This tool never accepts the password as an argument."
+            "session and explicit user confirmation. Use audit to show the tamper-evident action log. "
+            "Analysis never applies a fix. This tool never accepts the password as an argument."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action": {
                     "type": "STRING",
-                    "description": "activate | analyze | status | disable | set_personality | reset_personality | set_voice",
+                    "description": "activate | analyze | audit | status | disable | set_personality | reset_personality | set_voice",
                 },
                 "personality": {
                     "type": "STRING",
@@ -456,6 +464,7 @@ class JarvisLive:
             threshold=float(get_secret("WAKE_THRESHOLD", "0.55")),
             conversation_seconds=float(get_secret("CONVERSATION_TIMEOUT_SECONDS", "12")),
             voice_rms_threshold=int(get_secret("VOICE_RMS_THRESHOLD", "300")),
+            confirmation_frames=int(get_secret("WAKE_CONFIRM_FRAMES", "2")),
         )
         self.ui.on_text_command = self._on_text_command
         self.ui.on_manual_activate = self._manual_activate
@@ -550,14 +559,32 @@ class JarvisLive:
         if setter is not None:
             setter(bool(active))
 
+    def _audit_developer(
+        self,
+        action: str,
+        outcome: str,
+        details: dict | None = None,
+        changes: list[str] | tuple[str, ...] | None = None,
+    ) -> str:
+        event_id = append_developer_audit(action, outcome, details, changes)
+        self.ui.write_log(f"DEV: {event_id} · {outcome} · {action}")
+        return event_id
+
     async def _request_developer_password(self) -> tuple[bool, str]:
         requester = getattr(self.ui, "request_developer_password", None)
         if requester is None:
+            self._audit_developer("activate", "failed", {"reason": "password dialog unavailable"})
             return False, "La interfaz no permite introducir la contraseña localmente."
         password = await asyncio.to_thread(requester)
         if password is None:
+            self._audit_developer("activate", "cancelled")
             return False, "Activación cancelada."
         allowed, message = self.developer.verify(password)
+        self._audit_developer(
+            "activate",
+            "authorized" if allowed else "rejected",
+            {"message": message},
+        )
         self._set_developer_ui(allowed)
         if allowed:
             def relock_when_expired():
@@ -575,18 +602,46 @@ class JarvisLive:
     def _on_persona_settings_changed(self, personality: str, voice: str) -> None:
         if not self.developer.active:
             self._set_developer_ui(False)
+            self._audit_developer(
+                "settings.persona",
+                "rejected",
+                {"reason": "developer mode inactive"},
+            )
             self.ui.write_log(
                 "WARN: Activa primero el modo desarrollador diciendo 'Hey Jarvis, modo desarrollador'."
             )
             return
         try:
+            previous_personality = read_personality_style()
+            previous_voice = configured_voice()
             write_personality_style(personality)
             selected_voice = write_voice(voice)
+            changes = []
+            if personality.strip() != previous_personality:
+                changes.append("config/personality_style.txt")
+            if selected_voice != previous_voice:
+                changes.append(".env:JARVIS_VOICE")
+            event_id = self._audit_developer(
+                "settings.persona",
+                "applied",
+                {
+                    "personality_before": previous_personality,
+                    "personality_after": personality.strip(),
+                    "voice_before": previous_voice,
+                    "voice_after": selected_voice,
+                },
+                changes,
+            )
             self.ui.write_log(
-                f"SYS: Personalidad y voz {selected_voice} guardadas. Reiniciando Jarvis..."
+                f"SYS: Personalidad y voz {selected_voice} guardadas ({event_id}). Reiniciando Jarvis..."
             )
             threading.Thread(target=self._exit_for_update, daemon=True).start()
         except Exception as exc:
+            self._audit_developer(
+                "settings.persona",
+                "failed",
+                {"error": str(exc)},
+            )
             self.ui.write_log(f"ERR: No se pudo guardar la personalización: {exc}")
 
     def _sync_external_listening_state(self):
@@ -808,6 +863,12 @@ class JarvisLive:
 
         print(f"[JARVIS] ?? {name}  {args}")
         action = _normalized_action(args)
+        if self.developer.active and name != "developer_mode":
+            self._audit_developer(
+                "tool.request",
+                "requested",
+                {"tool": name, "action": action, "arguments": args},
+            )
         if self.ui.muted:
             print(f"[JARVIS] muted: ignored tool {name}/{action}")
             return types.FunctionResponse(
@@ -820,14 +881,31 @@ class JarvisLive:
             category = args.get("category", "notes")
             key = args.get("key", "")
             value = args.get("value", "")
-            if key and value:
+            self_change_note = " ".join((str(category), str(key), str(value)))
+            if SELF_CHANGE_MEMORY_PATTERN.search(self_change_note):
+                result = (
+                    "No memory was saved. Feedback about JARVIS errors, activation, personality, "
+                    "or future fixes is not a personal user fact. Apologize briefly in normal mode; "
+                    "developer analysis must use developer_mode and never implies a fix."
+                )
+            elif key and value:
                 update_memory({category: {key: {"value": value}}})
                 print(f"[Memory] ?? save_memory: {category}/{key} = {value}")
+                result = "ok"
+                if self.developer.active:
+                    self._audit_developer(
+                        "memory.save",
+                        "applied",
+                        {"category": category, "key": key, "value": value},
+                        ["memory/user_memory.json"],
+                    )
+            else:
+                result = "No memory was saved because key or value was empty."
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
                 id=fc.id, name=name,
-                response={"result": "ok", "silent": True}
+                response={"result": result, "silent": result == "ok"}
             )
 
         loop = asyncio.get_event_loop()
@@ -933,54 +1011,122 @@ class JarvisLive:
                 if developer_action == "activate":
                     allowed, message = await self._request_developer_password()
                     if allowed:
+                        event_id = self._audit_developer(
+                            "diagnostics.snapshot",
+                            "analysis_only",
+                            {"reason": "automatic snapshot after activation"},
+                        )
                         result = (
                             f"{message} The password was checked locally and must never be repeated. "
                             "Analyze the following diagnostic snapshot now. Clearly separate confirmed "
-                            "errors from possible improvements. Do not modify anything without an explicit "
-                            "confirmed request.\n\n" + diagnostic_snapshot()
+                            "errors from possible improvements. This is analysis only: no error has been "
+                            "fixed and no persistent change was made. Never say that anything was corrected. "
+                            f"Audit event: {event_id}.\n\n" + diagnostic_snapshot()
                         )
                     else:
                         result = message
                 elif developer_action == "status":
+                    event_id = self._audit_developer(
+                        "status",
+                        "read_only",
+                        {"active": self.developer.active},
+                    )
                     if self.developer.active:
                         result = (
                             "Developer mode is active for approximately "
-                            f"{max(1, self.developer.remaining_seconds // 60)} more minutes."
+                            f"{max(1, self.developer.remaining_seconds // 60)} more minutes. Audit event: {event_id}."
                         )
                     else:
-                        result = "Developer mode is disabled."
+                        result = f"Developer mode is disabled. Audit event: {event_id}."
                 elif developer_action == "disable":
+                    event_id = self._audit_developer("disable", "applied")
                     self.developer.deactivate()
                     self._set_developer_ui(False)
-                    result = "Developer mode disabled."
+                    result = f"Developer mode disabled. Audit event: {event_id}. No persistent setting changed."
                 elif not self.developer.active:
                     self._set_developer_ui(False)
+                    event_id = self._audit_developer(
+                        developer_action,
+                        "rejected",
+                        {"reason": "developer mode inactive"},
+                    )
                     result = (
                         "Developer mode is locked. Ask the user to say 'Hey Jarvis, modo desarrollador' "
-                        "and enter the password locally."
+                        f"and enter the password locally. Audit event: {event_id}."
                     )
                 elif developer_action == "analyze":
+                    event_id = self._audit_developer(
+                        "diagnostics.analyze",
+                        "analysis_only",
+                        {"persistent_changes": False},
+                    )
                     result = (
                         "Analyze this current JARVIS diagnostic snapshot. Explain likely root causes, "
-                        "what JARVIS did poorly, and safe improvements. Do not claim a fix was applied.\n\n"
+                        "what JARVIS did poorly, and safe improvements. This action cannot apply a fix. "
+                        "Do not say fixed, corrected, changed, learned, or saved. State clearly that no "
+                        f"persistent change was made. Audit event: {event_id}.\n\n"
                         + diagnostic_snapshot()
+                    )
+                elif developer_action == "audit":
+                    event_id = self._audit_developer("audit.read", "read_only")
+                    result = (
+                        f"Show this developer audit to the user. Audit read event: {event_id}.\n\n"
+                        + (read_developer_audit() or "No developer actions have been recorded yet.")
                     )
                 elif developer_action in {"set_personality", "reset_personality", "set_voice"}:
                     if not bool(args.get("confirmed")):
-                        result = "Sensitive change not applied. Ask for explicit confirmation first."
+                        event_id = self._audit_developer(
+                            developer_action,
+                            "rejected",
+                            {"reason": "explicit confirmation missing"},
+                        )
+                        result = (
+                            "Sensitive change not applied. Ask for explicit confirmation first. "
+                            f"Audit event: {event_id}."
+                        )
                     elif developer_action == "set_voice":
+                        previous_voice = configured_voice()
                         selected_voice = write_voice(str(args.get("voice") or ""))
+                        changes = [".env:JARVIS_VOICE"] if selected_voice != previous_voice else []
+                        event_id = self._audit_developer(
+                            "voice.set",
+                            "applied",
+                            {"before": previous_voice, "after": selected_voice},
+                            changes,
+                        )
                         self._request_restart_after_response()
-                        result = f"Voice changed to {selected_voice}. JARVIS will restart after this response."
+                        result = (
+                            f"Voice changed to {selected_voice}. Audit event: {event_id}. "
+                            "Only JARVIS_VOICE changed. JARVIS will restart after this response."
+                        )
                     else:
+                        previous_personality = read_personality_style()
                         personality = "" if developer_action == "reset_personality" else str(
                             args.get("personality") or ""
                         )
                         write_personality_style(personality)
+                        changes = (
+                            ["config/personality_style.txt"]
+                            if personality.strip() != previous_personality else []
+                        )
+                        event_id = self._audit_developer(
+                            "personality.reset" if developer_action == "reset_personality" else "personality.set",
+                            "applied",
+                            {"before": previous_personality, "after": personality.strip()},
+                            changes,
+                        )
                         self._request_restart_after_response()
-                        result = "Personality preferences saved. JARVIS will restart after this response."
+                        result = (
+                            f"Personality preferences saved. Audit event: {event_id}. "
+                            "No source code or API connection was changed. JARVIS will restart after this response."
+                        )
                 else:
-                    result = "Unknown developer action."
+                    event_id = self._audit_developer(
+                        developer_action,
+                        "rejected",
+                        {"reason": "unknown developer action"},
+                    )
+                    result = f"Unknown developer action. Audit event: {event_id}."
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
@@ -1002,6 +1148,21 @@ class JarvisLive:
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
+
+        if self.developer.active and name != "developer_mode":
+            persistent_changes = []
+            if name == "home_control":
+                persistent_changes = [f"Home Assistant device state ({action or 'unknown'})"]
+            elif name == "pi_controls" and action not in {"status", "list"}:
+                persistent_changes = [f"Raspberry Pi device state ({action or 'unknown'})"]
+            elif name == "jarvis_update" and action == "install" and "installed" in str(result).lower():
+                persistent_changes = ["JARVIS application files via verified update"]
+            self._audit_developer(
+                "tool.result",
+                "failed" if str(result).startswith("Tool '") else "completed",
+                {"tool": name, "action": action, "result": str(result)[:1500]},
+                persistent_changes,
+            )
 
         print(f"[JARVIS] ?? {name} ? {str(result)[:80]}")
 

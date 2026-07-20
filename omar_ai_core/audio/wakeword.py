@@ -22,12 +22,16 @@ class WakeWordGate:
         threshold: float = 0.55,
         conversation_seconds: float = 12.0,
         voice_rms_threshold: int = 300,
+        confirmation_frames: int = 2,
     ) -> None:
         self.mode = mode if mode in {"wakeword", "continuous", "manual"} else "wakeword"
         self.threshold = max(0.05, min(0.99, float(threshold)))
         self.conversation_seconds = max(3.0, float(conversation_seconds))
         self.voice_rms_threshold = max(20, int(voice_rms_threshold))
+        self.confirmation_frames = max(1, min(4, int(confirmation_frames)))
         self._active_until = float("inf") if self.mode == "continuous" else 0.0
+        self._fixed_window = False
+        self._consecutive_hits = 0
         self._model = None
         self._buffer = bytearray()
         self._lock = threading.Lock()
@@ -71,20 +75,25 @@ class WakeWordGate:
         return time.monotonic() < self._active_until
 
     def activate(self) -> None:
+        self._fixed_window = False
         self._active_until = time.monotonic() + self.conversation_seconds
 
     def activate_for(self, seconds: float) -> None:
         """Open the privacy gate for an explicit short follow-up window."""
         if self.mode != "continuous":
+            self._fixed_window = True
             self._active_until = time.monotonic() + max(0.5, float(seconds))
 
     def extend_conversation(self) -> None:
-        if self.active:
+        # The contextual follow-up window is deliberately exact. Ambient
+        # speech must not turn five seconds into a new twelve-second session.
+        if self.active and not self._fixed_window:
             self.activate()
 
     def deactivate(self) -> None:
         if self.mode != "continuous":
             self._active_until = 0.0
+            self._fixed_window = False
 
     def contains_voice(self, pcm: bytes) -> bool:
         samples = array("h")
@@ -111,14 +120,22 @@ class WakeWordGate:
 
                 samples = np.frombuffer(raw, dtype=np.int16)
                 prediction = self._model.predict(samples)
+                frame_best = 0.0
                 for value in prediction.values():
                     try:
                         score = float(value[-1] if hasattr(value, "__len__") else value)
                     except (TypeError, ValueError, IndexError):
                         continue
-                    best = max(best, score)
-                if best >= self.threshold:
+                    frame_best = max(frame_best, score)
+                best = max(best, frame_best)
+                if frame_best >= self.threshold:
+                    self._consecutive_hits += 1
+                else:
+                    self._consecutive_hits = 0
+                strong_hit = frame_best >= min(0.99, self.threshold + 0.20)
+                if strong_hit or self._consecutive_hits >= self.confirmation_frames:
                     detected = True
+                    self._consecutive_hits = 0
                     self.activate()
                     break
         return detected, best

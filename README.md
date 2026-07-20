@@ -95,6 +95,12 @@ the password is verified on the Raspberry Pi and is never sent to Gemini. The
 authorized session lasts 30 minutes. The initial password is the one selected
 privately by the owner; change its SHA-256 value in `.env` before sharing the device.
 
+Every developer analysis, rejected attempt, tool request, and real sensitive
+change is written to the `AJUSTES` → `HISTORIAL` → `ACCIONES DEV` audit. Entries
+are chained with SHA-256 so later edits are detected. A diagnostic analysis is
+read-only: Jarvis may recommend a correction but cannot claim it was applied.
+Real changes always report an audit event ID and the exact setting or file changed.
+
 After unlocking, open `AJUSTES` → `PERSONA` to edit speaking style and choose a
 Gemini Live voice. The base behavior remains in
 `omar_ai_core/persona/system_prompt.txt`; user preferences are stored separately
@@ -103,6 +109,10 @@ privacy rules. The selected voice is stored as `JARVIS_VOICE` in `.env`.
 
 The current voice is `Charon`. Other useful choices include `Kore` or `Orus`
 (firm), `Puck` or `Laomedeia` (upbeat), `Gacrux` (mature), and `Sulafat` (warm).
+
+After Jarvis finishes speaking, a fixed five-second contextual window accepts a
+direct follow-up. Ambient speech cannot extend that deadline. Speech addressed
+to Siri, Alexa, Google, Bixby, another assistant, or another person is ignored.
 
 The app uses an in-app dim overlay for brightness because many HDMI touchscreens do not expose a hardware backlight device to Linux.
 
@@ -224,7 +234,7 @@ sudo reboot
 
 ## Remote Updates
 
-Version 0.6.0 can check and install Raspberry Pi updates published through a
+Version 0.1.1 can check and install Raspberry Pi updates published through a
 public GitHub repository. Configure the repository in `.env`:
 
 ```env
@@ -241,7 +251,7 @@ memory, visual settings, and audio configuration are preserved. See
 
 Press `AJUSTES` in the bottom bar to open the Raspberry Pi settings surface:
 
-- `HISTORIAL` shows saved user requests, Jarvis responses, and recent errors.
+- `HISTORIAL` shows conversations, recent errors, and the tamper-evident `ACCIONES DEV` audit.
 - `AUDIO` selects the PortAudio input (microphone) and output (speaker).
 - `GENERAL` shows the local activation phrase: `Hey Jarvis`.
 

@@ -48,6 +48,33 @@ class DeveloperModeTests(unittest.TestCase):
         self.assertNotIn("AIzaabcdefghijklmnopqrstuvwxyz123456", snapshot)
         self.assertIn("REDACTED", snapshot)
 
+    def test_audit_is_redacted_hash_chained_and_tamper_evident(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "developer_audit.jsonl"
+            with patch.object(developer, "DEVELOPER_AUDIT_FILE", target):
+                first = developer.append_developer_audit(
+                    "diagnostics.analyze",
+                    "analysis_only",
+                    {"api_key": "AIzaabcdefghijklmnopqrstuvwxyz123456"},
+                )
+                second = developer.append_developer_audit(
+                    "voice.set",
+                    "applied",
+                    {"before": "Charon", "after": "Kore"},
+                    [".env:JARVIS_VOICE"],
+                )
+                audit = developer.read_developer_audit()
+                self.assertIn(first, audit)
+                self.assertIn(second, audit)
+                self.assertIn("INTEGRIDAD DEL REGISTRO: VERIFICADA", audit)
+                self.assertNotIn("AIzaabcdefghijklmnopqrstuvwxyz123456", target.read_text(encoding="utf-8"))
+
+                target.write_text(
+                    target.read_text(encoding="utf-8").replace("analysis_only", "altered", 1),
+                    encoding="utf-8",
+                )
+                self.assertIn("ALTERADA O DAÑADA", developer.read_developer_audit())
+
 
 if __name__ == "__main__":
     unittest.main()
