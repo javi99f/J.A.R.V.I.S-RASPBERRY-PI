@@ -1497,6 +1497,7 @@ class PiSettingsOverlay(QFrame):
     audio_devices_changed = pyqtSignal(object, object)
     audio_refresh_requested = pyqtSignal()
     persona_settings_changed = pyqtSignal(str, str)
+    diagnostic_export_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1575,6 +1576,16 @@ class PiSettingsOverlay(QFrame):
         refresh = QPushButton("ACTUALIZAR HISTORIAL")
         refresh.clicked.connect(self.refresh_history)
         layout.addWidget(refresh)
+        self.diagnostic_status = QLabel("")
+        self.diagnostic_status.setWordWrap(True)
+        self.diagnostic_status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.diagnostic_status.setStyleSheet(f"color: {C.TEXT_MED};")
+        layout.addWidget(self.diagnostic_status)
+        self.export_diagnostic = QPushButton("EXPORTAR DIAGNÓSTICO COMPLETO")
+        self.export_diagnostic.clicked.connect(self._request_diagnostic_export)
+        layout.addWidget(self.export_diagnostic)
         self.tabs.addTab(page, "HISTORIAL")
 
     def _build_audio_tab(self) -> None:
@@ -1634,6 +1645,13 @@ class PiSettingsOverlay(QFrame):
         detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         detail.setStyleSheet(f"color: {C.TEXT_MED}; font-size: 12px;")
         layout.addWidget(detail)
+        self.wake_status = QLabel("Comprobando modelo y señal del micrófono…")
+        self.wake_status.setWordWrap(True)
+        self.wake_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.wake_status.setStyleSheet(
+            f"color: {C.AMBER}; background: #001018; border: 1px solid {C.BORDER}; padding: 10px;"
+        )
+        layout.addWidget(self.wake_status)
         developer = QLabel(
             "MODO DESARROLLADOR\nDi “Hey Jarvis, modo desarrollador”. Jarvis solicitará "
             "la contraseña por escrito y de forma oculta. La sesión autorizada dura 30 minutos."
@@ -1785,6 +1803,54 @@ class PiSettingsOverlay(QFrame):
         self.audio_refresh_requested.emit()
         QTimer.singleShot(700, self.refresh_audio_devices)
 
+    def _request_diagnostic_export(self) -> None:
+        self.export_diagnostic.setEnabled(False)
+        self.export_diagnostic.setText("PREPARANDO…")
+        self.diagnostic_status.setText(
+            "Recopilando sistema, audio, conversaciones y errores…"
+        )
+        self.diagnostic_export_requested.emit()
+
+    def set_diagnostic_result(self, result: dict) -> None:
+        self.export_diagnostic.setEnabled(True)
+        self.export_diagnostic.setText("EXPORTAR DIAGNÓSTICO COMPLETO")
+        if str((result or {}).get("status")) == "ready":
+            self.diagnostic_status.setText(
+                "Enlace privado (10 minutos):\n" + str(result.get("url") or "")
+            )
+            self.diagnostic_status.setStyleSheet(f"color: {C.GREEN};")
+        else:
+            self.diagnostic_status.setText(
+                "No se pudo crear el informe: " + str((result or {}).get("message") or "error")
+            )
+            self.diagnostic_status.setStyleSheet(f"color: {C.RED};")
+
+    def set_wake_status(self, status: dict) -> None:
+        status = dict(status or {})
+        available = bool(status.get("available"))
+        frames = int(status.get("frames_processed") or 0)
+        rms = float(status.get("last_rms") or 0)
+        score = float(status.get("last_score") or 0)
+        peak = float(status.get("peak_score") or 0)
+        threshold = float(status.get("threshold") or 0)
+        if not available:
+            text = "MODELO HEY JARVIS: ERROR\n" + str(status.get("error") or "No cargado")
+            color = C.RED
+        elif frames == 0:
+            text = "MODELO HEY JARVIS: OK · esperando señal del micrófono"
+            color = C.AMBER
+        else:
+            signal = "SIN SEÑAL" if rms < 20 else ("BAJA" if rms < 180 else "OK")
+            text = (
+                f"MODELO HEY JARVIS: OK · MIC: {signal} (RMS {rms:.0f})\n"
+                f"PUNTUACIÓN: {score:.3f} · MÁXIMA: {peak:.3f} · UMBRAL: {threshold:.2f}"
+            )
+            color = C.GREEN if signal == "OK" else C.AMBER
+        self.wake_status.setText(text)
+        self.wake_status.setStyleSheet(
+            f"color: {color}; background: #001018; border: 1px solid {color}; padding: 10px;"
+        )
+
     def refresh_all(self) -> None:
         self.refresh_history()
         self.refresh_audio_devices()
@@ -1799,6 +1865,8 @@ class MainWindow(QMainWindow):
     _developer_status_sig = pyqtSignal(bool)
     _spotify_state_sig = pyqtSignal(object)
     _update_result_sig = pyqtSignal(object)
+    _diagnostic_result_sig = pyqtSignal(object)
+    _wake_status_sig = pyqtSignal(object)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1856,6 +1924,8 @@ class MainWindow(QMainWindow):
         self.on_persona_settings_changed = None
         self.on_spotify_control = None
         self.on_update_requested = None
+        self.on_diagnostic_export_requested = None
+        self._wake_status = {}
         self._muted           = False
         self._current_file: str | None = None
         self._settings_overlay: PiSettingsOverlay | None = None
@@ -1912,6 +1982,8 @@ class MainWindow(QMainWindow):
         self._developer_status_sig.connect(self._apply_developer_status)
         self._spotify_state_sig.connect(self._apply_spotify_state)
         self._update_result_sig.connect(self._apply_update_result)
+        self._diagnostic_result_sig.connect(self._apply_diagnostic_result)
+        self._wake_status_sig.connect(self._apply_wake_status)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -2233,9 +2305,13 @@ class MainWindow(QMainWindow):
             self._settings_overlay.persona_settings_changed.connect(
                 self._apply_persona_settings
             )
+            self._settings_overlay.diagnostic_export_requested.connect(
+                self._request_diagnostic_export
+            )
         self._settings_overlay.setGeometry(self.centralWidget().rect())
         self._settings_overlay.refresh_all()
         self._settings_overlay.set_developer_unlocked(self._developer_unlocked)
+        self._settings_overlay.set_wake_status(self._wake_status)
         self._settings_overlay.show()
         self._settings_overlay.raise_()
 
@@ -2253,6 +2329,38 @@ class MainWindow(QMainWindow):
     def _refresh_audio_settings(self):
         if self._settings_overlay is not None:
             self._settings_overlay.refresh_audio_devices()
+
+    def _request_diagnostic_export(self):
+        if not self.on_diagnostic_export_requested:
+            self._diagnostic_result_sig.emit(
+                {"status": "error", "message": "El exportador de diagnósticos no está conectado."}
+            )
+            return
+
+        def worker():
+            try:
+                result = self.on_diagnostic_export_requested()
+            except Exception as exc:
+                result = {"status": "error", "message": str(exc)}
+            self._diagnostic_result_sig.emit(dict(result or {}))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_diagnostic_result(self, result: dict):
+        if self._settings_overlay is not None:
+            self._settings_overlay.set_diagnostic_result(result)
+        if str((result or {}).get("status")) == "ready":
+            self._log.append_log("SYS: Diagnóstico completo preparado para descargar.")
+        else:
+            self._log.append_log(
+                "ERR: No se pudo exportar el diagnóstico: "
+                + str((result or {}).get("message") or "error desconocido")
+            )
+
+    def _apply_wake_status(self, status: dict):
+        self._wake_status = dict(status or {})
+        if self._settings_overlay is not None:
+            self._settings_overlay.set_wake_status(self._wake_status)
 
     def _apply_persona_settings(self, personality: str, voice: str):
         if self.on_persona_settings_changed:
@@ -2714,6 +2822,17 @@ class JarvisUI:
     @on_update_requested.setter
     def on_update_requested(self, callback):
         self._win.on_update_requested = callback
+
+    @property
+    def on_diagnostic_export_requested(self):
+        return self._win.on_diagnostic_export_requested
+
+    @on_diagnostic_export_requested.setter
+    def on_diagnostic_export_requested(self, callback):
+        self._win.on_diagnostic_export_requested = callback
+
+    def set_wake_status(self, status: dict):
+        self._win._wake_status_sig.emit(dict(status or {}))
 
     def request_developer_password(self):
         return self._win.request_developer_password()

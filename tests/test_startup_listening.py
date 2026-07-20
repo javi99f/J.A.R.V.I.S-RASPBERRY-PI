@@ -17,6 +17,7 @@ class StartupListeningTests(unittest.TestCase):
             mode="wakeword",
             available=True,
             error=None,
+            health_snapshot=lambda: {},
         )
         ui = _UI()
         with patch("omar_ai_core.runtime.UpdateManager"), patch(

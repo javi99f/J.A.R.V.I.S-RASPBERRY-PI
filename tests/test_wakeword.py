@@ -53,6 +53,22 @@ class WakeWordGateTests(unittest.TestCase):
         strong._model = FakeModel([0.80])
         self.assertTrue(strong.process(frame)[0])
 
+    def test_confirmation_accepts_two_peaks_within_one_phrase(self):
+        class FakeModel:
+            def __init__(self):
+                self.scores = iter([0.42, 0.10, 0.43])
+
+            def predict(self, _samples):
+                return {"hey jarvis": [next(self.scores)]}
+
+        frame = b"\0" * (WakeWordGate.FRAME_SAMPLES * 2)
+        gate = WakeWordGate(mode="manual", threshold=0.40, confirmation_frames=2)
+        gate.mode = "wakeword"
+        gate._model = FakeModel()
+        self.assertFalse(gate.process(frame)[0])
+        self.assertFalse(gate.process(frame)[0])
+        self.assertTrue(gate.process(frame)[0])
+
     def test_continuous_mode_is_always_active(self):
         gate = WakeWordGate(mode="continuous")
         self.assertTrue(gate.available)

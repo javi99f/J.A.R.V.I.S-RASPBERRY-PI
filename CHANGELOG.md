@@ -1,5 +1,15 @@
 # Historial de versiones
 
+## Cambios para la version 0.3.0
+
+- Añadida la exportación de diagnósticos técnicos en un archivo TXT seguro.
+- Añadido un enlace privado y temporal para descargar el informe desde otro dispositivo de la red local.
+- Incluido el contexto completo de conversaciones y errores para investigar fallos profundos.
+- Añadida la eliminación automática de claves API, tokens, contraseñas y secretos antes de compartir el informe.
+- Añadido un botón táctil de exportación dentro de Ajustes e integración con órdenes naturales de voz o texto.
+- Corregida la detección de «Hey Jarvis» en micrófonos USB de nivel bajo: VAD opcional, ganancia local automática y umbral calibrado.
+- Añadida telemetría visible del modelo, señal RMS, puntuación y umbral en Ajustes > General.
+
 ## Cambios para la version 0.2.1
 
 - Corregida la actualización desde Python 3.13 para que no intente descargar un `tflite-runtime` incompatible.

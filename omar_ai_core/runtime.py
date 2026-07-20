@@ -23,6 +23,7 @@ from .tools.web_lookup import web_search as web_search_action
 from .tools.pi_device import pi_controls
 from .tools.home_control import home_control
 from .tools.spotify_control import spotify_control, spotify_snapshot
+from .diagnostic_export import create_diagnostic_report, share_diagnostic_report
 from .settings import BASE_DIR, get_secret, is_desktop_mode, require_secret
 from .state import listening as listening_state
 from .audio.wakeword import WakeWordGate
@@ -437,6 +438,18 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "export_diagnostics",
+        "description": (
+            "Creates a complete redacted JARVIS diagnostic TXT including recent conversation context and "
+            "temporarily shares it through a private local-network download link. Use when the user "
+            "asks to export, send, share, or prepare JARVIS errors for support."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+        },
+    },
+    {
         "name": "shutdown_jarvis",
         "description": "Shuts down the assistant when the user clearly asks to stop, quit, close, or end JARVIS.",
         "parameters": {"type": "OBJECT", "properties": {}},
@@ -459,7 +472,10 @@ TOOL_DECLARATIONS = [
 
 def _available_tool_declarations() -> list[dict]:
     if is_desktop_mode():
-        disabled = {"pi_controls", "social_insights", "jarvis_update", "spotify_player"}
+        disabled = {
+            "pi_controls", "social_insights", "jarvis_update", "spotify_player",
+            "export_diagnostics",
+        }
         return [item for item in TOOL_DECLARATIONS if item.get("name") not in disabled]
     return TOOL_DECLARATIONS
 
@@ -498,12 +514,20 @@ class JarvisLive:
         self._followup_listen_seconds = max(
             1.0, float(get_secret("FOLLOWUP_LISTEN_SECONDS", "5"))
         )
+        configured_wake_threshold = get_secret("WAKE_THRESHOLD", "0.40").strip()
+        # 0.55 was the old shipped default. Migrate that exact legacy value to
+        # the calibrated default while preserving every custom value.
+        if configured_wake_threshold in {"", "0.55"}:
+            configured_wake_threshold = "0.40"
         self.wake_gate = WakeWordGate(
             mode=get_secret("WAKE_MODE", "wakeword").lower(),
-            threshold=float(get_secret("WAKE_THRESHOLD", "0.55")),
+            threshold=float(configured_wake_threshold),
             conversation_seconds=float(get_secret("CONVERSATION_TIMEOUT_SECONDS", "12")),
             voice_rms_threshold=int(get_secret("VOICE_RMS_THRESHOLD", "300")),
             confirmation_frames=int(get_secret("WAKE_CONFIRM_FRAMES", "2")),
+            vad_threshold=float(get_secret("WAKE_VAD_THRESHOLD", "0")),
+            auto_gain=get_secret("WAKE_AUTO_GAIN", "1").strip().lower()
+            not in {"0", "false", "no", "off"},
         )
         self.ui.on_text_command = self._on_text_command
         self.ui.on_manual_activate = self._manual_activate
@@ -517,6 +541,8 @@ class JarvisLive:
             self.ui.on_spotify_control = self._on_spotify_control
         if hasattr(self.ui, "on_update_requested"):
             self.ui.on_update_requested = self._on_update_requested
+        if hasattr(self.ui, "on_diagnostic_export_requested"):
+            self.ui.on_diagnostic_export_requested = self._on_diagnostic_export_requested
         # Muting is a temporary privacy control for the current session. A
         # previous shutdown must never leave the appliance muted on next boot.
         listening_state.set_listening_muted(False)
@@ -526,6 +552,8 @@ class JarvisLive:
             self.ui.write_log("SYS: Privacy fallback active; use typed commands until it is repaired.")
         elif self.wake_gate.error:
             self.ui.write_log(f"WARN: {self.wake_gate.error}")
+        if hasattr(self.ui, "set_wake_status"):
+            self.ui.set_wake_status(self.wake_gate.health_snapshot())
 
     def _on_audio_devices_changed(self, input_device, output_device) -> None:
         try:
@@ -775,6 +803,33 @@ class JarvisLive:
                 }
             return {"status": "error", "message": f"Acción de actualización desconocida: {action}"}
 
+    def _on_diagnostic_export_requested(self) -> dict:
+        report = create_diagnostic_report(
+            {
+                "assistant_state": "MUTED" if self.ui.muted else "ACTIVE",
+                "microphone_available": self._microphone_available,
+                "speaker_available": self._speaker_available,
+                "input_device": self._input_device,
+                "output_device": self._output_device,
+                "wake_mode": self.wake_gate.mode,
+                "wake_available": self.wake_gate.available,
+                "wake_error": self.wake_gate.error,
+                "wake_telemetry": self.wake_gate.health_snapshot(),
+            }
+        )
+        shared = share_diagnostic_report(report)
+        self.ui.write_log(f"SYS: Diagnóstico seguro creado: {report.name}")
+        return {
+            "status": "ready",
+            "path": shared["path"],
+            "url": shared["url"],
+            "expires_seconds": shared["expires_seconds"],
+            "message": (
+                "Informe TXT seguro preparado. Ábrelo desde otro dispositivo de la misma red "
+                "usando el enlace temporal y adjunta el archivo en el chat de Codex."
+            ),
+        }
+
     def _text_send_finished(self, future):
         try:
             future.result()
@@ -882,9 +937,19 @@ class JarvisLive:
                 self.wake_gate.deactivate()
                 continue
 
+            previous_error = self.wake_gate.error
             detected, score = await asyncio.to_thread(self.wake_gate.process, data)
+            if self.wake_gate.error and self.wake_gate.error != previous_error:
+                self.ui.write_log(f"ERR: Detector Hey Jarvis: {self.wake_gate.error}")
+            if (
+                hasattr(self.ui, "set_wake_status")
+                and self.wake_gate.frames_processed % 25 == 0
+            ):
+                self.ui.set_wake_status(self.wake_gate.health_snapshot())
             if detected:
                 self.ui.write_log(f"SYS: Hey Jarvis detected ({score:.2f}).")
+                if hasattr(self.ui, "set_wake_status"):
+                    self.ui.set_wake_status(self.wake_gate.health_snapshot())
                 self.ui.set_state("LISTENING")
                 for chunk in self._pre_roll:
                     self._queue_mic_chunk(chunk)
@@ -1115,6 +1180,19 @@ class JarvisLive:
                             )
                 else:
                     result = "Unknown update action. Use check, install, or status."
+
+            elif name == "export_diagnostics":
+                if is_desktop_mode():
+                    result = "Diagnostic export is currently available only on the Raspberry Pi edition."
+                else:
+                    exported = await loop.run_in_executor(
+                        None, self._on_diagnostic_export_requested
+                    )
+                    result = (
+                        f"Diagnostic report ready at {exported['url']}. "
+                        f"The private local link expires in {exported['expires_seconds']} seconds. "
+                        "Tell the user to open it from a device on the same network and attach the TXT to Codex."
+                    )
 
             elif name == "developer_mode":
                 developer_action = action or "status"
