@@ -8,5 +8,9 @@ ddgs>=9,<10
 psutil>=5.9,<8
 Pillow>=10,<13
 numpy>=1.26,<3
-openwakeword==0.6.0
+# Python 3.13 ARM64 has no compatible tflite-runtime wheel.  The Raspberry
+# installer installs openWakeWord separately with --no-deps and uses ONNX.
+# Keeping this marker also lets older Jarvis updaters install new requirements
+# without trying (and failing) to resolve tflite-runtime again.
+openwakeword==0.6.0; python_version < "3.13"
 spotipy>=2.25,<3

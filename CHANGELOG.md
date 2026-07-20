@@ -1,5 +1,10 @@
 # Historial de versiones
 
+## Cambios para la version 0.2.1
+
+- Corregida la actualización desde Python 3.13 para que no intente descargar un `tflite-runtime` incompatible.
+- Conservada la instalación existente de openWakeWord en Raspberry Pi sin modificar el motor de activación.
+
 ## Cambios para la version 0.2.0
 
 - El botón `UPDATE` muestra siempre el resultado y se recupera automáticamente si GitHub no responde.
