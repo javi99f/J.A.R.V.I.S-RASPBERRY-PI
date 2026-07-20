@@ -104,9 +104,10 @@ def append_developer_audit(
     with _audit_lock:
         previous_hash = "GENESIS"
         try:
-            lines = DEVELOPER_AUDIT_FILE.read_text(encoding="utf-8").splitlines()
-            if lines:
-                previous_hash = str(json.loads(lines[-1]).get("entry_hash") or "GENESIS")
+            if DEVELOPER_AUDIT_FILE.exists():
+                lines = DEVELOPER_AUDIT_FILE.read_text(encoding="utf-8").splitlines()
+                if lines:
+                    previous_hash = str(json.loads(lines[-1]).get("entry_hash") or "GENESIS")
         except (OSError, ValueError, TypeError):
             previous_hash = "UNVERIFIED_PREVIOUS_ENTRY"
 
