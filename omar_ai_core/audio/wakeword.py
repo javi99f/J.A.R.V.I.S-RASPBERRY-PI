@@ -53,6 +53,7 @@ class WakeWordGate:
         self.frames_processed = 0
         self.prediction_failures = 0
         self.last_detection_at = 0.0
+        self.soft_threshold = max(0.05, self.threshold * 0.60)
         if self.mode == "wakeword":
             self._load_model()
 
@@ -132,6 +133,7 @@ class WakeWordGate:
             "mode": self.mode,
             "model": self.model_name or "no cargado",
             "threshold": round(self.threshold, 3),
+            "soft_threshold": round(self.soft_threshold, 3),
             "vad_threshold": round(self.vad_threshold, 3),
             "auto_gain": self.auto_gain,
             "last_score": round(self.last_score, 4),
@@ -186,14 +188,21 @@ class WakeWordGate:
                 best = max(best, frame_best)
                 self.last_score = frame_best
                 self.peak_score = max(self.peak_score, frame_best)
-                if frame_best >= self.threshold:
-                    self._consecutive_hits += 1
-                else:
-                    self._consecutive_hits = 0
-                self._recent_hits.append(frame_best >= self.threshold)
-                strong_hit = frame_best >= min(0.99, self.threshold + 0.20)
-                confirmed_in_phrase = sum(self._recent_hits) >= self.confirmation_frames
-                if strong_hit or confirmed_in_phrase:
+                # openWakeWord's score is already a complete decision for the
+                # current 80 ms frame.  Requiring two *full-threshold* frames
+                # discarded normal wake phrases whose confidence has one
+                # short peak.  A normal threshold hit must therefore activate
+                # immediately, as recommended by openWakeWord.  The rolling
+                # confirmation is retained only as a second chance for two or
+                # more weaker peaks within the same phrase.
+                threshold_hit = frame_best >= self.threshold
+                soft_hit = frame_best >= self.soft_threshold
+                self._recent_hits.append(soft_hit)
+                confirmed_soft_phrase = (
+                    self.confirmation_frames > 1
+                    and sum(self._recent_hits) >= self.confirmation_frames
+                )
+                if threshold_hit or confirmed_soft_phrase:
                     detected = True
                     self._consecutive_hits = 0
                     self._recent_hits.clear()

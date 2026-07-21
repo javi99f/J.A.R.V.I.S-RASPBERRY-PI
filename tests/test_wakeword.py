@@ -33,7 +33,7 @@ class WakeWordGateTests(unittest.TestCase):
         with patch("omar_ai_core.audio.wakeword.time.monotonic", return_value=121.9):
             self.assertTrue(gate.active)
 
-    def test_wakeword_requires_confirmation_unless_score_is_strong(self):
+    def test_normal_threshold_peak_activates_immediately(self):
         class FakeModel:
             def __init__(self, scores):
                 self.scores = iter(scores)
@@ -44,19 +44,13 @@ class WakeWordGateTests(unittest.TestCase):
         frame = b"\0" * (WakeWordGate.FRAME_SAMPLES * 2)
         gate = WakeWordGate(mode="manual", threshold=0.55, confirmation_frames=2)
         gate.mode = "wakeword"
-        gate._model = FakeModel([0.60, 0.61])
-        self.assertFalse(gate.process(frame)[0])
+        gate._model = FakeModel([0.60])
         self.assertTrue(gate.process(frame)[0])
-
-        strong = WakeWordGate(mode="manual", threshold=0.55, confirmation_frames=2)
-        strong.mode = "wakeword"
-        strong._model = FakeModel([0.80])
-        self.assertTrue(strong.process(frame)[0])
 
     def test_confirmation_accepts_two_peaks_within_one_phrase(self):
         class FakeModel:
             def __init__(self):
-                self.scores = iter([0.42, 0.10, 0.43])
+                self.scores = iter([0.26, 0.10, 0.27])
 
             def predict(self, _samples):
                 return {"hey jarvis": [next(self.scores)]}
@@ -68,6 +62,22 @@ class WakeWordGateTests(unittest.TestCase):
         self.assertFalse(gate.process(frame)[0])
         self.assertFalse(gate.process(frame)[0])
         self.assertTrue(gate.process(frame)[0])
+
+    def test_isolated_soft_peak_does_not_activate(self):
+        class FakeModel:
+            def __init__(self):
+                self.scores = iter([0.26, 0.10, 0.09])
+
+            def predict(self, _samples):
+                return {"hey jarvis": next(self.scores)}
+
+        frame = b"\0" * (WakeWordGate.FRAME_SAMPLES * 2)
+        gate = WakeWordGate(mode="manual", threshold=0.40, confirmation_frames=2)
+        gate.mode = "wakeword"
+        gate._model = FakeModel()
+        self.assertFalse(gate.process(frame)[0])
+        self.assertFalse(gate.process(frame)[0])
+        self.assertFalse(gate.process(frame)[0])
 
     def test_continuous_mode_is_always_active(self):
         gate = WakeWordGate(mode="continuous")

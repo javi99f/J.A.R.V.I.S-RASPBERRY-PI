@@ -1,5 +1,12 @@
 # Historial de versiones
 
+## Cambios para la version 0.3.1
+
+- Corregida la activación de `Hey Jarvis` para aceptar inmediatamente un pico válido del modelo oficial.
+- Conservada una confirmación secundaria con dos picos débiles de la misma frase para mejorar el reconocimiento a distancia.
+- Evitado que un único ruido débil active el asistente.
+- Añadido al diagnóstico el umbral secundario empleado por el detector local.
+
 ## Cambios para la version 0.3.0
 
 - Añadida la exportación de diagnósticos técnicos en un archivo TXT seguro.
